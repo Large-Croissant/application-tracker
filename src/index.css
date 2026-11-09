@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+/* Tauri windows don't get browser default user-agent styles; normalize a bit */
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background-color: theme(--color-zinc-950);
+  color: theme(--color-zinc-200);
+  -webkit-font-smoothing: antialiased;
+  font-family:
+    "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system,
+    sans-serif;
+}
+
+/* Shared control styles; kept self-contained (Tailwind v4 @apply only accepts utilities) */
+.input {
+  @apply w-full rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-sm text-zinc-200
+    placeholder:text-zinc-600 outline-none focus:border-zinc-500 focus:ring-1 focus:ring-zinc-500;
+}
+
+.label {
+  @apply mb-1 block text-xs font-medium text-zinc-400;
+}
+
+.btn {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium
+    transition-colors select-none disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+.btn-primary {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium
+    transition-colors select-none disabled:cursor-not-allowed disabled:opacity-50
+    bg-zinc-100 text-zinc-900 hover:bg-white;
+}
+
+.btn-ghost {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium
+    transition-colors select-none disabled:cursor-not-allowed disabled:opacity-50
+    text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200;
+}
+
+.btn-danger {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium
+    transition-colors select-none disabled:cursor-not-allowed disabled:opacity-50
+    border border-red-900 bg-red-950 text-red-300 hover:bg-red-900;
+}
+
+/* Thin scrollbars to fit the app feel */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background-color: theme(--color-zinc-700);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: theme(--color-zinc-600);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
