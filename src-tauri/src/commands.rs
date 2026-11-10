@@ -303,6 +303,19 @@ pub fn list_events(
 }
 
 #[tauri::command]
+pub fn list_all_events(state: State<DbState>) -> Result<Vec<ApplicationEvent>, String> {
+    let conn = lock_db(&state)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT * FROM application_events
+             ORDER BY application_id ASC, occurred_at ASC, id ASC",
+        )
+        .map_err(err_msg)?;
+    let rows = stmt.query_map([], event_from_row).map_err(err_msg)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(err_msg)
+}
+
+#[tauri::command]
 pub fn add_event(
     application_id: i64,
     input: EventInput,
@@ -576,6 +589,246 @@ fn first_line_of(body: &str) -> String {
         .chars()
         .take(80)
         .collect()
+}
+
+// ---------- Sample data (evaluate Insights before real data arrives) ----------
+//
+// Everything created here is prefixed "Sample · " so it can be removed again
+// with one click without touching real rows. Transitions recorded as
+// status_change events use the same "old → new" note shape the app writes.
+
+const SAMPLE_PREFIX: &str = "Sample · ";
+const ARROW_SEP: &str = " → ";
+
+/// Tiny deterministic RNG: repeat clicks reproduce the same dataset.
+struct SampleRng(u64);
+impl SampleRng {
+    fn pick(&mut self, n: u64) -> u64 {
+        let mut x = self.0.max(1);
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        (x.wrapping_mul(0x2545_F491_4F6C_DD1D)) % n
+    }
+}
+
+/// The forward-only, event chain consistent with a final status.
+fn sample_transitions(final_status: &str, rng: &mut SampleRng) -> Vec<(&'static str, &'static str)> {
+    let mut through_ack = |_from: &str, to: &'static str, ack: &'static str| -> Vec<(&'static str, &'static str)> {
+        if rng.pick(2) == 0 {
+            vec![("applied", to)]
+        } else {
+            vec![("applied", ack), (ack, to)]
+        }
+    };
+    match final_status {
+        "applied" => vec![],
+        "acknowledged" => vec![("applied", "acknowledged")],
+        "interviewing" => vec![
+            ("applied", "acknowledged"),
+            ("acknowledged", "interviewing"),
+        ],
+        "offer" => vec![
+            ("applied", "acknowledged"),
+            ("acknowledged", "interviewing"),
+            ("interviewing", "offer"),
+        ],
+        "accepted" => vec![
+            ("applied", "acknowledged"),
+            ("acknowledged", "interviewing"),
+            ("interviewing", "offer"),
+            ("offer", "accepted"),
+        ],
+        "rejected" => through_ack("applied", "rejected", "acknowledged"),
+        "ghosted" => through_ack("applied", "ghosted", "acknowledged"),
+        "withdrawn" => vec![("applied", "withdrawn")],
+        _ => vec![],
+    }
+}
+
+#[tauri::command]
+pub fn seed_sample_data(state: State<DbState>) -> Result<usize, String> {
+    use chrono::{Duration, Local, Months};
+
+    const COMPANIES: [&str; 24] = [
+        "Netflix", "Stripe", "Figma", "Notion", "Airbnb", "Shopify", "Linear", "Datadog",
+        "Plaid", "Ramp", "Vercel", "Retool", "Anthropic", "OpenAI", "Gusto", "Brex",
+        "DoorDash", "Uber", "Lyft", "Coinbase", "Roblox", "Snowflake", "Twilio", "Atlassian",
+    ];
+    const ROLES: [&str; 14] = [
+        "Senior Software Engineer",
+        "Software Engineer, Fullstack",
+        "Staff Backend Engineer",
+        "Software Engineer II",
+        "Frontend Engineer",
+        "Platform Engineer",
+        "DevOps Engineer",
+        "Software Engineer, Infrastructure",
+        "Fullstack Engineer",
+        "Backend Engineer",
+        "Software Engineer III",
+        "Senior Fullstack Developer",
+        "Machine Learning Engineer",
+        "Site Reliability Engineer",
+    ];
+    const LOCATIONS: [&str; 8] = [
+        "New York, NY", "San Francisco, CA", "Seattle, WA", "Austin, TX",
+        "Boston, MA", "Chicago, IL", "Denver, CO", "Atlanta, GA",
+    ];
+    const SOURCES: [&str; 6] = [
+        "LinkedIn", "Indeed", "Company site", "Referral", "Wellfound", "Hiring cafe",
+    ];
+
+    // Fixed status distribution across 42 sample applications.
+    let statuses: [&str; 42] = [
+        "wishlist", "wishlist", "wishlist", "wishlist", "wishlist", "wishlist",
+        "applied", "applied", "applied", "applied", "applied",
+        "acknowledged", "acknowledged", "acknowledged", "acknowledged",
+        "interviewing", "interviewing", "interviewing", "interviewing",
+        "offer", "offer", "accepted", "rejected", "rejected", "rejected", "rejected",
+        "rejected", "rejected", "rejected", "rejected", "rejected", "rejected",
+        "rejected", "ghosted", "ghosted", "ghosted", "ghosted", "ghosted", "ghosted",
+        "withdrawn", "withdrawn", "applied",
+    ];
+
+    let conn = lock_db(&state)?;
+    let tx = conn.unchecked_transaction().map_err(err_msg)?;
+    let mut rng = SampleRng(0x53a1_e12b_00d5_c4fe);
+    let today = Local::now().date_naive();
+    let earliest = today - Duration::days(235);
+    let now = now_iso();
+    let mut inserted = 0_usize;
+
+    for (i, status) in statuses.iter().enumerate() {
+        let mut company = COMPANIES[i % COMPANIES.len()].to_string();
+        if i >= COMPANIES.len() {
+            company.push_str(" — round 2");
+        }
+        let role = ROLES[(i * 5 + 3) % ROLES.len()];
+        let location = LOCATIONS[rng.pick(LOCATIONS.len() as u64) as usize];
+        let source = SOURCES[rng.pick(SOURCES.len() as u64) as usize];
+        let work_mode = ["", "onsite", "hybrid", "remote"][rng.pick(4) as usize];
+
+        let is_wishlist = *status == "wishlist";
+        // Applied date: seeded over the last ~8 months.
+        let mut applied: Option<chrono::NaiveDate> = None;
+        if !is_wishlist {
+            let months_back = rng.pick(8) as u32;
+            let base = today.checked_sub_months(Months::new(months_back)).unwrap_or(today);
+            applied = Some((base - Duration::days(rng.pick(26) as i64)).max(earliest));
+        }
+        let applied_at = applied.map(|d| d.format("%Y-%m-%d").to_string());
+
+        // Pay: mostly a yearly number, sometimes a range, occasionally hourly.
+        let mut salary: Option<f64> = None;
+        let mut salary_max: Option<f64> = None;
+        let mut period = "";
+        if !is_wishlist || rng.pick(4) == 0 {
+            match rng.pick(7) {
+                0 => {
+                    // Hourly contract role.
+                    let rate = 35 + rng.pick(31) as i64;
+                    salary = Some(rate as f64);
+                    if rng.pick(4) == 0 {
+                        salary_max = Some(rate as f64 + rng.pick(11) as f64 + 5.0);
+                    }
+                    period = "hourly";
+                }
+                _ => {
+                    let base_salary = 72000 + rng.pick(26) as i64 * 5000;
+                    salary = Some(base_salary as f64);
+                    if rng.pick(4) == 0 {
+                        salary_max =
+                            Some((base_salary + 5000 + rng.pick(6) as i64 * 5000) as f64);
+                    }
+                    period = "yearly";
+                }
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO applications
+                (company, role, status, source, posting_url, location, work_mode,
+                 salary_amount, salary_amount_max, salary_currency, salary_period,
+                 contact_name, contact_email, notes, posting_text,
+                 applied_at, next_followup_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18)",
+            params![
+                format!("{SAMPLE_PREFIX}{company}"),
+                role,
+                status,
+                source,
+                "",
+                location,
+                work_mode,
+                salary,
+                salary_max,
+                "USD",
+                period,
+                "",
+                "",
+                if is_wishlist { "Wishlist — not sent yet." } else { "Sample application." },
+                "",
+                applied_at,
+                Option::<String>::None,
+                now,
+            ],
+        )
+        .map_err(err_msg)?;
+        inserted += 1;
+        if is_wishlist {
+            continue;
+        }
+        let app_id = tx.last_insert_rowid();
+        let applied_day = applied.unwrap_or(today);
+
+        // Starting note + forward transcript of moves.
+        let mut events: Vec<(String, &'static str, String)> =
+            vec![(applied_day.format("%Y-%m-%d").to_string(), "note", "Applied online".into())];
+        let mut day = applied_day + Duration::days(1 + rng.pick(4) as i64);
+        for (_, (from, to)) in sample_transitions(status, &mut rng).into_iter().enumerate() {
+            if day > today {
+                break; // never record events in the future
+            }
+            events.push((day.format("%Y-%m-%d").to_string(), "status_change", format!("{from}{ARROW_SEP}{to}")));
+            day = day + Duration::days(1 + rng.pick(7) as i64);
+            if to == "interviewing" {
+                events.push((day.format("%Y-%m-%d").to_string(), "interview", "Technical interview with the team".into()));
+            }
+        }
+        if *status == "offer" && day <= today {
+            events.push((day.format("%Y-%m-%d").to_string(), "offer", "Verbal offer received".into()));
+        }
+        if *status == "accepted" && day <= today {
+            events.push((day.format("%Y-%m-%d").to_string(), "decision", "Signed the offer letter".into()));
+        }
+
+        for (occurred, kind, note) in events {
+            tx.execute(
+                "INSERT INTO application_events
+                    (application_id, occurred_at, kind, note, correspondence_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)",
+                params![app_id, occurred, kind, note, now],
+            )
+            .map_err(err_msg)?;
+        }
+    }
+    tx.commit().map_err(err_msg)?;
+    Ok(inserted)
+}
+
+/// Removes everything the sample seeder created (matched by company prefix).
+#[tauri::command]
+pub fn delete_sample_data(state: State<DbState>) -> Result<usize, String> {
+    let conn = lock_db(&state)?;
+    let deleted = conn
+        .execute(
+            "DELETE FROM applications WHERE company LIKE ?1",
+            params![format!("{SAMPLE_PREFIX}%")],
+        )
+        .map_err(err_msg)?;
+    Ok(deleted)
 }
 
 // ---------- Vault: profile, references, answers, resumes ----------

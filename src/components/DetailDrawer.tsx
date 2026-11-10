@@ -12,15 +12,14 @@ import {
 } from "../lib/datetime";
 import {
   CORRESPONDENCE_KINDS,
-  STATUSES,
   correspondenceKindMeta,
   eventKindMeta,
-  statusMeta,
   type Application,
   type ApplicationCorrespondence,
   type ApplicationEvent,
   type CorrespondenceKind,
 } from "../types";
+import StatusMenu from "./StatusMenu";
 
 interface Props {
   app: Application;
@@ -307,8 +306,6 @@ export default function DetailDrawer({
     }
   }
 
-  const status = statusMeta(app.status);
-
   // Planned items first (soonest first), then history (most recent first).
   const { upcoming, history } = useMemo(() => {
     const planned = items.filter((it) => isPlanned(it.occurredAt));
@@ -340,32 +337,18 @@ export default function DetailDrawer({
             </button>
           </div>
 
-          {/* Inline progression: status lives here, not behind the Edit modal */}
+          {/* Inline progression: status lives here, not behind the Edit modal.
+              One pill = the single source of stage truth; menu saves on pick. */}
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-2">
-              <span className="text-xs font-medium text-zinc-500">Status</span>
-              <select
-                className="input max-w-36 px-2 py-1 text-xs"
-                value={String(app.status)}
-                disabled={busyStatus}
-                onChange={(e) => handleStatusChange(e.target.value)}
-                aria-label="Application status"
-              >
-                {STATUSES.map((s) => (
-                  <option key={s.value} value={s.value}>
-                    {s.label}
-                  </option>
-                ))}
-              </select>
-              {busyStatus && <span className="text-xs text-zinc-500">saving…</span>}
-            </label>
-
-            <span
-              className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${status.badge}`}
-            >
-              <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
-              {status.label}
-            </span>
+            <StatusMenu
+              variant="pill"
+              current={String(app.status)}
+              disabled={busyStatus}
+              onPick={(v) => {
+                if (v) handleStatusChange(v);
+              }}
+            />
+            {busyStatus && <span className="text-xs text-zinc-500">saving…</span>}
 
             <span className="ml-auto flex items-center gap-2">
               <button className="btn-ghost px-3 py-1.5 text-xs" onClick={() => onEdit(app)}>
@@ -534,20 +517,15 @@ export default function DetailDrawer({
                     </select>
                   )}
                   {/* Status bump */}
-                  <select
-                    className="input ml-auto max-w-44 px-2 py-1 text-xs"
-                    value={draft.bumpStatus}
-                    onChange={(e) => setDraft((d) => ({ ...d, bumpStatus: e.target.value }))}
-                    aria-label="Status change with this item"
-                    title="Optionally move the application's status when saving"
-                  >
-                    <option value="">Don’t change status</option>
-                    {STATUSES.map((s) => (
-                      <option key={s.value} value={s.value}>
-                        → {s.label}
-                      </option>
-                    ))}
-                  </select>
+                  <span className="ml-auto">
+                    <StatusMenu
+                      variant="compact"
+                      allowNone
+                      current={draft.bumpStatus || null}
+                      onPick={(v) => setDraft((d) => ({ ...d, bumpStatus: v ?? "" }))}
+                      title="Optionally move the application's stage when saving"
+                    />
+                  </span>
                 </div>
                 <textarea
                   className="input min-h-20 resize-y"
@@ -858,20 +836,15 @@ function CorrespondenceCard({
               <option value="in_person">In person</option>
             </select>
           )}
-          <select
-            className="input ml-auto max-w-44 px-2 py-1 text-xs"
-            value={editDraft.bumpStatus}
-            onChange={(e) => onEditDraft({ ...editDraft, bumpStatus: e.target.value })}
-            aria-label="Status change with this item"
-            title="Optionally move the application's status when saving"
-          >
-            <option value="">Don’t change status</option>
-            {STATUSES.map((s) => (
-              <option key={s.value} value={s.value}>
-                → {s.label}
-              </option>
-            ))}
-          </select>
+          <span className="ml-auto">
+            <StatusMenu
+              variant="compact"
+              allowNone
+              current={editDraft.bumpStatus || null}
+              onPick={(v) => onEditDraft({ ...editDraft, bumpStatus: v ?? "" })}
+              title="Optionally move the application's stage when saving"
+            />
+          </span>
         </div>
         <textarea
           className="input mt-2 min-h-20 resize-y"

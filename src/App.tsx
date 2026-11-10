@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import ApplicationForm from "./components/ApplicationForm";
 import ApplicationsTable from "./components/ApplicationsTable";
 import DetailDrawer from "./components/DetailDrawer";
+import InsightsPanel from "./components/InsightsPanel";
 import KanbanBoard from "./components/KanbanBoard";
 import StatsStrip from "./components/StatsStrip";
 import VaultPanel from "./components/VaultPanel";
@@ -16,16 +17,6 @@ const TABS = [
 ] as const;
 
 type Tab = (typeof TABS)[number]["id"];
-
-/** Placeholder panel for areas not built until later phases. */
-function ComingSoon({ title, blurb }: { title: string; blurb: string }) {
-  return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900/50 p-10 text-center">
-      <h2 className="text-lg font-semibold text-zinc-300">{title}</h2>
-      <p className="max-w-md text-sm text-zinc-500">{blurb}</p>
-    </div>
-  );
-}
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("applications");
@@ -258,10 +249,7 @@ export default function App() {
 
         {tab === "vault" && <VaultPanel />}
         {tab === "insights" && (
-          <ComingSoon
-            title="Insights"
-            blurb="Deeper stats and the flowchart view of how your applications move through stages. Built in phase 5."
-          />
+          <InsightsPanel applications={apps} onDataChanged={load} />
         )}
         {tab === "settings" && (
           <div className="max-w-xl space-y-4">

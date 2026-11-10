@@ -4,10 +4,17 @@
   color-scheme: dark;
 }
 
-/* Tauri windows don't get browser default user-agent styles; normalize a bit */
+/* Tauri windows don't get browser default user-agent styles; normalize a bit.
+   The app root is h-full — that percentage needs #root to have height too,
+   otherwise every internal scroll area silently stops working. */
+html,
+body,
+#root {
+  height: 100%;
+}
+
 html,
 body {
-  height: 100%;
   overflow: hidden;
 }
 

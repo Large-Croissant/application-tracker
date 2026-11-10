@@ -65,6 +65,21 @@ export function listEvents(applicationId: number): Promise<ApplicationEvent[]> {
   return invoke("list_events", { applicationId });
 }
 
+/** Every timeline event across all applications (Insights / flow view). */
+export function listAllEvents(): Promise<ApplicationEvent[]> {
+  return invoke("list_all_events");
+}
+
+/** Creates a batch of "Sample · ..." applications with full histories. */
+export function seedSampleData(): Promise<number> {
+  return invoke("seed_sample_data");
+}
+
+/** Removes the sample applications again (matched by their prefix). */
+export function deleteSampleData(): Promise<number> {
+  return invoke("delete_sample_data");
+}
+
 export function addEvent(
   applicationId: number,
   input: EventInput,
