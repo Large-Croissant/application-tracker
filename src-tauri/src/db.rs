@@ -39,6 +39,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             location TEXT NOT NULL DEFAULT '',
             work_mode TEXT NOT NULL DEFAULT '',
             salary_amount REAL,
+            -- Optional upper bound of a pay range.
+            salary_amount_max REAL,
             salary_currency TEXT NOT NULL DEFAULT 'USD',
             -- empty = not listed; else: yearly | monthly | hourly | contract | other
             salary_period TEXT NOT NULL DEFAULT '',
@@ -135,6 +137,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     upgrade_salary_columns(conn)?;
     upgrade_correspondence(conn)?;
+    ensure_column(conn, "applications", "salary_amount_max", "REAL")?;
     // Copy-paste vault: resume text lives with its version record.
     ensure_column(
         conn,

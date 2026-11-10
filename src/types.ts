@@ -108,6 +108,8 @@ export interface Application {
   location: string;
   workMode: string;
   salaryAmount: number | null;
+  /** Optional upper bound of a pay range. */
+  salaryAmountMax: number | null;
   salaryCurrency: string;
   salaryPeriod: string;
   contactName: string;
@@ -129,6 +131,8 @@ export interface ApplicationInput {
   location: string;
   workMode: string;
   salaryAmount: number | null;
+  /** Optional upper bound of a pay range. */
+  salaryAmountMax: number | null;
   salaryCurrency: string;
   salaryPeriod: string;
   contactName: string;

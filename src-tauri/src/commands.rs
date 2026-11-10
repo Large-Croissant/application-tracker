@@ -31,6 +31,7 @@ fn application_from_row(row: &Row) -> rusqlite::Result<Application> {
         role: row.get("role")?,
         status: row.get("status")?,
         salary_amount: row.get("salary_amount")?,
+        salary_amount_max: row.get("salary_amount_max")?,
         salary_currency: row.get("salary_currency")?,
         salary_period: row.get("salary_period")?,
         source: row.get("source")?,
@@ -81,10 +82,10 @@ fn insert_application(conn: &Connection, input: &ApplicationInput) -> rusqlite::
     conn.execute(
         "INSERT INTO applications
             (company, role, status, source, posting_url, location, work_mode,
-             salary_amount, salary_currency, salary_period,
+             salary_amount, salary_amount_max, salary_currency, salary_period,
              contact_name, contact_email, notes, posting_text,
              applied_at, next_followup_at, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18)",
         params![
             input.company,
             input.role,
@@ -94,6 +95,7 @@ fn insert_application(conn: &Connection, input: &ApplicationInput) -> rusqlite::
             input.location,
             input.work_mode,
             input.salary_amount,
+            input.salary_amount_max,
             input.salary_currency,
             input.salary_period,
             input.contact_name,
@@ -127,11 +129,11 @@ fn save_and_fetch(
         "UPDATE applications SET
             company = ?1, role = ?2, status = ?3, source = ?4,
             posting_url = ?5, location = ?6, work_mode = ?7,
-            salary_amount = ?8, salary_currency = ?9, salary_period = ?10,
-            contact_name = ?11, contact_email = ?12, notes = ?13,
-            posting_text = ?14, applied_at = ?15, next_followup_at = ?16,
-            updated_at = ?17
-         WHERE id = ?18",
+            salary_amount = ?8, salary_amount_max = ?9, salary_currency = ?10, salary_period = ?11,
+            contact_name = ?12, contact_email = ?13, notes = ?14,
+            posting_text = ?15, applied_at = ?16, next_followup_at = ?17,
+            updated_at = ?18
+         WHERE id = ?19",
         params![
             input.company,
             input.role,
@@ -141,6 +143,7 @@ fn save_and_fetch(
             input.location,
             input.work_mode,
             input.salary_amount,
+            input.salary_amount_max,
             input.salary_currency,
             input.salary_period,
             input.contact_name,
@@ -194,6 +197,12 @@ fn validate(input: &ApplicationInput) -> Result<(), String> {
     }
     if input.status.trim().is_empty() {
         return Err("Status is required.".into());
+    }
+    // A range only makes sense with its low end above its high end checked out.
+    if let (Some(min), Some(max)) = (input.salary_amount, input.salary_amount_max) {
+        if max < min {
+            return Err("The top of the pay range can't be below the bottom.".into());
+        }
     }
     Ok(())
 }

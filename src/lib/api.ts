@@ -49,6 +49,7 @@ export function applicationToInput(app: Application): ApplicationInput {
     location: app.location,
     workMode: app.workMode,
     salaryAmount: app.salaryAmount,
+    salaryAmountMax: app.salaryAmountMax,
     salaryCurrency: app.salaryCurrency,
     salaryPeriod: app.salaryPeriod,
     contactName: app.contactName,

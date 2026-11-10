@@ -25,6 +25,7 @@ function emptyInput(): ApplicationInput {
     location: "",
     workMode: "",
     salaryAmount: null,
+    salaryAmountMax: null,
     salaryCurrency: "USD",
     salaryPeriod: "",
     contactName: "",
@@ -46,6 +47,7 @@ function fromApplication(app: Application): ApplicationInput {
     location: app.location,
     workMode: app.workMode,
     salaryAmount: app.salaryAmount,
+    salaryAmountMax: app.salaryAmountMax,
     salaryCurrency: app.salaryCurrency,
     salaryPeriod: app.salaryPeriod,
     contactName: app.contactName,
@@ -84,9 +86,12 @@ export default function ApplicationForm({ editing, saving, error, onClose, onSav
   // Custom source that isn't one of the presets keeps its own text input.
   const isPresetSource = input.source === "" || SOURCES.includes(input.source);
 
-  // Raw text shown in the pay field while typing; grouped formatting applies on blur.
+  // Raw text shown in the pay fields while typing; grouped formatting on blur.
   const [salaryText, setSalaryText] = useState(() =>
     editing?.salaryAmount != null ? formatAmountInput(String(editing.salaryAmount)) : "",
+  );
+  const [salaryMaxText, setSalaryMaxText] = useState(() =>
+    editing?.salaryAmountMax != null ? formatAmountInput(String(editing.salaryAmountMax)) : "",
   );
 
   return (
@@ -239,20 +244,39 @@ export default function ApplicationForm({ editing, saving, error, onClose, onSav
                   ))}
                 </select>
                 {input.salaryPeriod !== "" && (
-                  <div className="input mt-2 flex items-center gap-1.5">
-                    <span className="text-zinc-500 select-none">$</span>
-                    <input
-                      aria-label="Pay amount"
-                      className="w-full bg-transparent outline-none placeholder:text-zinc-600"
-                      value={salaryText}
-                      placeholder={input.salaryPeriod === "hourly" ? "32.50" : "120k"}
-                      onChange={(e) => {
-                        setSalaryText(e.target.value);
-                        set("salaryAmount", parseAmount(e.target.value));
-                      }}
-                      onBlur={() => setSalaryText(formatAmountInput(salaryText))}
-                      onFocus={(e) => e.currentTarget.select()}
-                    />
+                  <div className="mt-2 space-y-1">
+                    <div className="input flex items-center gap-1.5">
+                      <span className="text-zinc-500 select-none">$</span>
+                      <input
+                        aria-label="Pay amount"
+                        className="w-full bg-transparent outline-none placeholder:text-zinc-600"
+                        value={salaryText}
+                        placeholder={input.salaryPeriod === "hourly" ? "32.50" : "120k"}
+                        onChange={(e) => {
+                          setSalaryText(e.target.value);
+                          set("salaryAmount", parseAmount(e.target.value));
+                        }}
+                        onBlur={() => setSalaryText(formatAmountInput(salaryText))}
+                        onFocus={(e) => e.currentTarget.select()}
+                      />
+                    </div>
+                    {/* Optional upper bound of the pay range */}
+                    <div className="input flex items-center gap-1.5">
+                      <span className="text-zinc-600 select-none">to</span>
+                      <span className="text-zinc-500 select-none">$</span>
+                      <input
+                        aria-label="Pay range top (optional)"
+                        className="w-full bg-transparent outline-none placeholder:text-zinc-600"
+                        value={salaryMaxText}
+                        placeholder="optional — e.g. 140k"
+                        onChange={(e) => {
+                          setSalaryMaxText(e.target.value);
+                          set("salaryAmountMax", parseAmount(e.target.value));
+                        }}
+                        onBlur={() => setSalaryMaxText(formatAmountInput(salaryMaxText))}
+                        onFocus={(e) => e.currentTarget.select()}
+                      />
+                    </div>
                   </div>
                 )}
               </div>

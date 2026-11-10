@@ -14,6 +14,8 @@ pub struct Application {
     pub work_mode: String,
     /// Compensation amount as a number (sort/format/sync friendly).
     pub salary_amount: Option<f64>,
+    /// Optional upper bound of a pay range.
+    pub salary_amount_max: Option<f64>,
     /// ISO currency code, default USD.
     pub salary_currency: String,
     /// Empty (not listed), or: yearly | monthly | hourly | contract | other
@@ -43,6 +45,8 @@ pub struct ApplicationInput {
     pub location: String,
     pub work_mode: String,
     pub salary_amount: Option<f64>,
+    /// Optional upper bound of a pay range.
+    pub salary_amount_max: Option<f64>,
     pub salary_currency: String,
     pub salary_period: String,
     pub contact_name: String,

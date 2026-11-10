@@ -86,15 +86,33 @@ interface SalaryDisplayOptions {
   compact?: boolean;
 }
 
-/** Renders a stored salary for display, e.g. "$120,000" or "$32.50/hr". */
+/** Renders a stored salary for display, e.g. "$120,000" or "$32.50/hr".
+ * When a pay range is stored, renders "$110,000–$140,000" (or compact
+ * "$110k–$140k"), with the period suffix after the range. */
 export function formatSalary(
-  app: Pick<Application, "salaryAmount" | "salaryCurrency" | "salaryPeriod">,
+  app: Pick<
+    Application,
+    "salaryAmount" | "salaryAmountMax" | "salaryCurrency" | "salaryPeriod"
+  >,
   options: SalaryDisplayOptions = {},
 ): string {
-  const { salaryAmount: amount, salaryCurrency: currency, salaryPeriod: period } = app;
+  const {
+    salaryAmount: amount,
+    salaryAmountMax: max,
+    salaryCurrency: currency,
+    salaryPeriod: period,
+  } = app;
   if (amount === null || amount === undefined) return "—";
   const cur = currency || "USD";
-  const base = options.compact ? abbrevAmount(amount, cur) : fullAmount(amount, cur);
+  let base: string;
+  const hasRange = max !== null && max !== undefined && max !== amount;
+  if (hasRange) {
+    base = options.compact
+      ? `${abbrevAmount(amount, cur)}–${abbrevAmount(max, cur)}`
+      : `${fullAmount(amount, cur)}–${fullAmount(max, cur)}`;
+  } else {
+    base = options.compact ? abbrevAmount(amount, cur) : fullAmount(amount, cur);
+  }
   switch (period) {
     case "monthly":
       return `${base}/mo`;
