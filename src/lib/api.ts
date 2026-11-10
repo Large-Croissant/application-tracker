@@ -4,8 +4,15 @@ import type {
   ApplicationCorrespondence,
   ApplicationEvent,
   ApplicationInput,
+  AnswerInput,
   CorrespondenceInput,
   EventInput,
+  PreparedAnswer,
+  ProfileField,
+  ReferenceContact,
+  ReferenceInput,
+  ResumeInput,
+  ResumeVersion,
 } from "../types";
 
 /** Typed wrappers around the Tauri commands. */
@@ -97,4 +104,69 @@ export function updateCorrespondence(
 
 export function deleteCorrespondence(id: number): Promise<boolean> {
   return invoke("delete_correspondence", { id });
+}
+
+// ---------- Vault ----------
+
+/** Upserts a profile field; an empty value deletes the row. */
+export function setProfile(key: string, value: string): Promise<ProfileField> {
+  return invoke("set_profile", { key, value });
+}
+
+export function listProfile(): Promise<ProfileField[]> {
+  return invoke("list_profile");
+}
+
+export function listReferences(): Promise<ReferenceContact[]> {
+  return invoke("list_references");
+}
+
+export function addReference(input: ReferenceInput): Promise<ReferenceContact> {
+  return invoke("add_reference", { input });
+}
+
+export function updateReference(
+  id: number,
+  input: ReferenceInput,
+): Promise<ReferenceContact> {
+  return invoke("update_reference", { id, input });
+}
+
+export function deleteReference(id: number): Promise<boolean> {
+  return invoke("delete_reference", { id });
+}
+
+export function listPreparedAnswers(): Promise<PreparedAnswer[]> {
+  return invoke("list_prepared_answers");
+}
+
+export function addPreparedAnswer(input: AnswerInput): Promise<PreparedAnswer> {
+  return invoke("add_prepared_answer", { input });
+}
+
+export function updatePreparedAnswer(
+  id: number,
+  input: AnswerInput,
+): Promise<PreparedAnswer> {
+  return invoke("update_prepared_answer", { id, input });
+}
+
+export function deletePreparedAnswer(id: number): Promise<boolean> {
+  return invoke("delete_prepared_answer", { id });
+}
+
+export function listResumes(): Promise<ResumeVersion[]> {
+  return invoke("list_resumes");
+}
+
+export function addResume(input: ResumeInput): Promise<ResumeVersion> {
+  return invoke("add_resume", { input });
+}
+
+export function updateResume(id: number, input: ResumeInput): Promise<ResumeVersion> {
+  return invoke("update_resume", { id, input });
+}
+
+export function deleteResume(id: number): Promise<boolean> {
+  return invoke("delete_resume", { id });
 }

@@ -4,6 +4,7 @@ import ApplicationsTable from "./components/ApplicationsTable";
 import DetailDrawer from "./components/DetailDrawer";
 import KanbanBoard from "./components/KanbanBoard";
 import StatsStrip from "./components/StatsStrip";
+import VaultPanel from "./components/VaultPanel";
 import * as api from "./lib/api";
 import type { Application, ApplicationInput } from "./types";
 
@@ -255,12 +256,7 @@ export default function App() {
           </>
         )}
 
-        {tab === "vault" && (
-          <ComingSoon
-            title="Quick-paste Vault"
-            blurb="Your profile details, references, prepared answers, and resume versions — one click to copy, ready for filling out application forms. Built in phase 3."
-          />
-        )}
+        {tab === "vault" && <VaultPanel />}
         {tab === "insights" && (
           <ComingSoon
             title="Insights"

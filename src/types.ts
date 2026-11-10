@@ -245,3 +245,68 @@ export interface CorrespondenceInput {
   /** Optional status bump applied together with saving. */
   followUpStatus: string | null;
 }
+
+// ---------- Vault ----------
+
+export interface ProfileField {
+  key: string;
+  value: string;
+  updatedAt: string;
+}
+
+export interface ReferenceContact {
+  id: number;
+  name: string;
+  relationship: string;
+  title: string;
+  company: string;
+  email: string;
+  phone: string;
+  linkedin: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReferenceInput {
+  name: string;
+  relationship: string;
+  title: string;
+  company: string;
+  email: string;
+  phone: string;
+  linkedin: string;
+  notes: string;
+}
+
+export interface PreparedAnswer {
+  id: number;
+  title: string;
+  body: string;
+  category: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AnswerInput {
+  title: string;
+  body: string;
+  category: string;
+}
+
+export interface ResumeVersion {
+  id: number;
+  name: string;
+  fileName: string;
+  notes: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResumeInput {
+  name: string;
+  fileName: string;
+  notes: string;
+  content: string;
+}

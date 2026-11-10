@@ -1,7 +1,8 @@
 use crate::db::{now_iso, DbState};
 use crate::models::{
     Application, ApplicationCorrespondence, ApplicationEvent, ApplicationInput,
-    CorrespondenceInput, EventInput,
+    CorrespondenceInput, EventInput, PreparedAnswer, ProfileField, ReferenceContact,
+    AnswerInput, ReferenceInput, ResumeInput, ResumeVersion,
 };
 use std::sync::MutexGuard;
 use rusqlite::{params, Connection, Row};
@@ -566,4 +567,332 @@ fn first_line_of(body: &str) -> String {
         .chars()
         .take(80)
         .collect()
+}
+
+// ---------- Vault: profile, references, answers, resumes ----------
+
+fn profile_from_row(row: &Row) -> rusqlite::Result<ProfileField> {
+    Ok(ProfileField {
+        key: row.get("field_key")?,
+        value: row.get("value")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+#[tauri::command]
+pub fn list_profile(state: State<DbState>) -> Result<Vec<ProfileField>, String> {
+    let conn = lock_db(&state)?;
+    let mut stmt = conn
+        .prepare("SELECT * FROM profile ORDER BY field_key ASC")
+        .map_err(err_msg)?;
+    let rows = stmt.query_map([], profile_from_row).map_err(err_msg)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(err_msg)
+}
+
+/// Upserts a profile field. An empty value deletes the row (the field
+/// disappears from the list; setting it again re-creates it).
+#[tauri::command]
+pub fn set_profile(
+    key: String,
+    value: String,
+    state: State<DbState>,
+) -> Result<ProfileField, String> {
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return Err("Field name is required.".into());
+    }
+    let conn = lock_db(&state)?;
+    let now = now_iso();
+    if value.trim().is_empty() {
+        conn.execute(
+            "DELETE FROM profile WHERE field_key = ?1",
+            params![key],
+        )
+        .map_err(err_msg)?;
+        return Ok(ProfileField {
+            key,
+            value: String::new(),
+            updated_at: now,
+        });
+    }
+    conn.execute(
+        "INSERT INTO profile (field_key, value, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(field_key) DO UPDATE SET value = ?2, updated_at = ?3",
+        params![key, value, now],
+    )
+    .map_err(err_msg)?;
+    Ok(ProfileField { key, value, updated_at: now })
+}
+
+fn reference_from_row(row: &Row) -> rusqlite::Result<ReferenceContact> {
+    Ok(ReferenceContact {
+        id: row.get("id")?,
+        name: row.get("name")?,
+        relationship: row.get("relationship")?,
+        title: row.get("title")?,
+        company: row.get("company")?,
+        email: row.get("email")?,
+        phone: row.get("phone")?,
+        linkedin: row.get("linkedin")?,
+        notes: row.get("notes")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn fetch_reference(conn: &Connection, id: i64) -> rusqlite::Result<ReferenceContact> {
+    conn.query_row(
+        "SELECT * FROM reference_contacts WHERE id = ?1",
+        params![id],
+        reference_from_row,
+    )
+}
+
+fn insert_reference(conn: &Connection, input: &ReferenceInput) -> rusqlite::Result<i64> {
+    let now = now_iso();
+    conn.execute(
+        "INSERT INTO reference_contacts
+            (name, relationship, title, company, email, phone, linkedin, notes,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+        params![
+            input.name,
+            input.relationship,
+            input.title,
+            input.company,
+            input.email,
+            input.phone,
+            input.linkedin,
+            input.notes,
+            now,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn validate_reference(input: &ReferenceInput) -> Result<(), String> {
+    if input.name.trim().is_empty() {
+        return Err("Name is required.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_references(state: State<DbState>) -> Result<Vec<ReferenceContact>, String> {
+    let conn = lock_db(&state)?;
+    let mut stmt = conn
+        .prepare("SELECT * FROM reference_contacts ORDER BY name ASC, id ASC")
+        .map_err(err_msg)?;
+    let rows = stmt.query_map([], reference_from_row).map_err(err_msg)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn add_reference(
+    input: ReferenceInput,
+    state: State<DbState>,
+) -> Result<ReferenceContact, String> {
+    validate_reference(&input)?;
+    let conn = lock_db(&state)?;
+    let id = insert_reference(&conn, &input).map_err(err_msg)?;
+    fetch_reference(&conn, id).map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn update_reference(
+    id: i64,
+    input: ReferenceInput,
+    state: State<DbState>,
+) -> Result<ReferenceContact, String> {
+    validate_reference(&input)?;
+    let conn = lock_db(&state)?;
+    let now = now_iso();
+    conn.execute(
+        "UPDATE reference_contacts SET
+            name = ?1, relationship = ?2, title = ?3, company = ?4,
+            email = ?5, phone = ?6, linkedin = ?7, notes = ?8, updated_at = ?9
+         WHERE id = ?10",
+        params![
+            input.name,
+            input.relationship,
+            input.title,
+            input.company,
+            input.email,
+            input.phone,
+            input.linkedin,
+            input.notes,
+            now,
+            id,
+        ],
+    )
+    .map_err(err_msg)?;
+    fetch_reference(&conn, id).map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn delete_reference(id: i64, state: State<DbState>) -> Result<bool, String> {
+    let conn = lock_db(&state)?;
+    conn.execute("DELETE FROM reference_contacts WHERE id = ?1", params![id])
+        .map_err(err_msg)?;
+    Ok(true)
+}
+
+fn answer_from_row(row: &Row) -> rusqlite::Result<PreparedAnswer> {
+    Ok(PreparedAnswer {
+        id: row.get("id")?,
+        title: row.get("title")?,
+        body: row.get("body")?,
+        category: row.get("category")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn fetch_answer(conn: &Connection, id: i64) -> rusqlite::Result<PreparedAnswer> {
+    conn.query_row(
+        "SELECT * FROM prepared_answers WHERE id = ?1",
+        params![id],
+        answer_from_row,
+    )
+}
+
+fn validate_answer(input: &AnswerInput) -> Result<(), String> {
+    if input.title.trim().is_empty() {
+        return Err("Title is required.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_prepared_answers(state: State<DbState>) -> Result<Vec<PreparedAnswer>, String> {
+    let conn = lock_db(&state)?;
+    let mut stmt = conn
+        .prepare("SELECT * FROM prepared_answers ORDER BY updated_at DESC, id DESC")
+        .map_err(err_msg)?;
+    let rows = stmt.query_map([], answer_from_row).map_err(err_msg)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn add_prepared_answer(
+    input: AnswerInput,
+    state: State<DbState>,
+) -> Result<PreparedAnswer, String> {
+    validate_answer(&input)?;
+    let conn = lock_db(&state)?;
+    let now = now_iso();
+    conn.execute(
+        "INSERT INTO prepared_answers (title, body, category, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4)",
+        params![input.title, input.body, input.category, now],
+    )
+    .map_err(err_msg)?;
+    let id = conn.last_insert_rowid();
+    fetch_answer(&conn, id).map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn update_prepared_answer(
+    id: i64,
+    input: AnswerInput,
+    state: State<DbState>,
+) -> Result<PreparedAnswer, String> {
+    validate_answer(&input)?;
+    let conn = lock_db(&state)?;
+    conn.execute(
+        "UPDATE prepared_answers SET title = ?1, body = ?2, category = ?3, updated_at = ?4
+         WHERE id = ?5",
+        params![input.title, input.body, input.category, now_iso(), id],
+    )
+    .map_err(err_msg)?;
+    fetch_answer(&conn, id).map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn delete_prepared_answer(id: i64, state: State<DbState>) -> Result<bool, String> {
+    let conn = lock_db(&state)?;
+    conn.execute("DELETE FROM prepared_answers WHERE id = ?1", params![id])
+        .map_err(err_msg)?;
+    Ok(true)
+}
+
+fn resume_from_row(row: &Row) -> rusqlite::Result<ResumeVersion> {
+    Ok(ResumeVersion {
+        id: row.get("id")?,
+        name: row.get("name")?,
+        file_name: row.get("file_name")?,
+        notes: row.get("notes")?,
+        content: row.get("content")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn fetch_resume(conn: &Connection, id: i64) -> rusqlite::Result<ResumeVersion> {
+    conn.query_row(
+        "SELECT * FROM resume_versions WHERE id = ?1",
+        params![id],
+        resume_from_row,
+    )
+}
+
+fn validate_resume(input: &ResumeInput) -> Result<(), String> {
+    if input.name.trim().is_empty() {
+        return Err("Version name is required.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_resumes(state: State<DbState>) -> Result<Vec<ResumeVersion>, String> {
+    let conn = lock_db(&state)?;
+    let mut stmt = conn
+        .prepare("SELECT * FROM resume_versions ORDER BY updated_at DESC, id DESC")
+        .map_err(err_msg)?;
+    let rows = stmt.query_map([], resume_from_row).map_err(err_msg)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn add_resume(
+    input: ResumeInput,
+    state: State<DbState>,
+) -> Result<ResumeVersion, String> {
+    validate_resume(&input)?;
+    let conn = lock_db(&state)?;
+    let now = now_iso();
+    conn.execute(
+        "INSERT INTO resume_versions (name, file_name, notes, content, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+        params![input.name, input.file_name, input.notes, input.content, now],
+    )
+    .map_err(err_msg)?;
+    let id = conn.last_insert_rowid();
+    fetch_resume(&conn, id).map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn update_resume(
+    id: i64,
+    input: ResumeInput,
+    state: State<DbState>,
+) -> Result<ResumeVersion, String> {
+    validate_resume(&input)?;
+    let conn = lock_db(&state)?;
+    conn.execute(
+        "UPDATE resume_versions
+         SET name = ?1, file_name = ?2, notes = ?3, content = ?4, updated_at = ?5
+         WHERE id = ?6",
+        params![input.name, input.file_name, input.notes, input.content, now_iso(), id],
+    )
+    .map_err(err_msg)?;
+    fetch_resume(&conn, id).map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn delete_resume(id: i64, state: State<DbState>) -> Result<bool, String> {
+    let conn = lock_db(&state)?;
+    conn.execute("DELETE FROM resume_versions WHERE id = ?1", params![id])
+        .map_err(err_msg)?;
+    Ok(true)
 }

@@ -109,3 +109,91 @@ pub struct CorrespondenceInput {
     pub body: String,
     pub follow_up_status: Option<String>,
 }
+
+// ---------- Vault ----------
+
+/// One quick-paste profile field (arbitrary key/value row).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileField {
+    /// The field label itself is the key (e.g. "Full name").
+    pub key: String,
+    pub value: String,
+    pub updated_at: String,
+}
+
+/// One reference contact for application forms.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceContact {
+    pub id: i64,
+    pub name: String,
+    pub relationship: String,
+    pub title: String,
+    pub company: String,
+    pub email: String,
+    pub phone: String,
+    pub linkedin: String,
+    pub notes: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Payload for creating or updating a reference contact.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceInput {
+    pub name: String,
+    pub relationship: String,
+    pub title: String,
+    pub company: String,
+    pub email: String,
+    pub phone: String,
+    pub linkedin: String,
+    pub notes: String,
+}
+
+/// One prepared interview/application answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedAnswer {
+    pub id: i64,
+    pub title: String,
+    /// application text often asks for a pasted version
+    pub body: String,
+    pub category: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Payload for creating or updating a prepared answer.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnswerInput {
+    pub title: String,
+    pub body: String,
+    pub category: String,
+}
+
+/// One named resume version with its (paste-friendly) text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeVersion {
+    pub id: i64,
+    pub name: String,
+    pub file_name: String,
+    pub notes: String,
+    pub content: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Payload for creating or updating a resume version.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeInput {
+    pub name: String,
+    pub file_name: String,
+    pub notes: String,
+    pub content: String,
+}

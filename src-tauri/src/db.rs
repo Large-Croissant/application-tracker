@@ -134,7 +134,14 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         "#,
     )?;
     upgrade_salary_columns(conn)?;
-    upgrade_correspondence(conn)
+    upgrade_correspondence(conn)?;
+    // Copy-paste vault: resume text lives with its version record.
+    ensure_column(
+        conn,
+        "resume_versions",
+        "content",
+        "TEXT NOT NULL DEFAULT ''",
+    )
 }
 
 /// One-time upgrade to the correspondence model:
