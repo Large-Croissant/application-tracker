@@ -30,7 +30,9 @@ function emptyInput(): ApplicationInput {
     contactName: "",
     contactEmail: "",
     notes: "",
+    postingText: "",
     appliedAt: null,
+    nextFollowupAt: null,
   };
 }
 
@@ -49,7 +51,9 @@ function fromApplication(app: Application): ApplicationInput {
     contactName: app.contactName,
     contactEmail: app.contactEmail,
     notes: app.notes,
+    postingText: app.postingText,
     appliedAt: app.appliedAt,
+    nextFollowupAt: app.nextFollowupAt,
   };
 }
 
@@ -149,6 +153,16 @@ export default function ApplicationForm({ editing, saving, error, onClose, onSav
                   className="input"
                   value={input.appliedAt ?? ""}
                   onChange={(e) => set("appliedAt", e.target.value || null)}
+                />
+              </div>
+              <div>
+                <label className="label" htmlFor="nextFollowupAt">Follow up on</label>
+                <input
+                  id="nextFollowupAt"
+                  type="date"
+                  className="input"
+                  value={input.nextFollowupAt ?? ""}
+                  onChange={(e) => set("nextFollowupAt", e.target.value || null)}
                 />
               </div>
 
@@ -272,6 +286,19 @@ export default function ApplicationForm({ editing, saving, error, onClose, onSav
                   value={input.notes}
                   onChange={(e) => set("notes", e.target.value)}
                   placeholder="Anything worth remembering about this application…"
+                />
+              </div>
+
+              <div className="col-span-2">
+                <label className="label" htmlFor="postingText">
+                  Saved posting text
+                </label>
+                <textarea
+                  id="postingText"
+                  className="input min-h-24 resize-y"
+                  value={input.postingText}
+                  onChange={(e) => set("postingText", e.target.value)}
+                  placeholder="Paste the job description here so you can re-read what you applied to…"
                 />
               </div>
             </div>

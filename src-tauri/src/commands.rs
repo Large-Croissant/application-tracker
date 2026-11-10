@@ -1,5 +1,8 @@
 use crate::db::{now_iso, DbState};
-use crate::models::{Application, ApplicationInput};
+use crate::models::{
+    Application, ApplicationCorrespondence, ApplicationEvent, ApplicationInput,
+    CorrespondenceInput, EventInput,
+};
 use std::sync::MutexGuard;
 use rusqlite::{params, Connection, Row};
 use tauri::State;
@@ -36,10 +39,32 @@ fn application_from_row(row: &Row) -> rusqlite::Result<Application> {
         contact_name: row.get("contact_name")?,
         contact_email: row.get("contact_email")?,
         notes: row.get("notes")?,
+        posting_text: row.get("posting_text")?,
         applied_at: row.get("applied_at")?,
+        next_followup_at: row.get("next_followup_at")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
+}
+
+fn event_from_row(row: &Row) -> rusqlite::Result<ApplicationEvent> {
+    Ok(ApplicationEvent {
+        id: row.get("id")?,
+        application_id: row.get("application_id")?,
+        occurred_at: row.get("occurred_at")?,
+        kind: row.get("kind")?,
+        note: row.get("note")?,
+        correspondence_id: row.get("correspondence_id")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn event_kind_valid(kind: &str) -> bool {
+    matches!(
+        kind,
+        "note" | "call" | "interview" | "offer" | "decision" | "status_change" | "email" | "meeting"
+    )
 }
 
 fn fetch_application(conn: &Connection, id: i64) -> rusqlite::Result<Application> {
@@ -56,9 +81,9 @@ fn insert_application(conn: &Connection, input: &ApplicationInput) -> rusqlite::
         "INSERT INTO applications
             (company, role, status, source, posting_url, location, work_mode,
              salary_amount, salary_currency, salary_period,
-             contact_name, contact_email, notes, applied_at,
-             created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)",
+             contact_name, contact_email, notes, posting_text,
+             applied_at, next_followup_at, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17)",
         params![
             input.company,
             input.role,
@@ -73,7 +98,9 @@ fn insert_application(conn: &Connection, input: &ApplicationInput) -> rusqlite::
             input.contact_name,
             input.contact_email,
             input.notes,
+            input.posting_text,
             input.applied_at,
+            input.next_followup_at,
             now,
         ],
     )?;
@@ -81,19 +108,29 @@ fn insert_application(conn: &Connection, input: &ApplicationInput) -> rusqlite::
 }
 
 /// Updates the given application and returns its fresh row.
+/// When the status changes, a `status_change` timeline event is auto-written.
 fn save_and_fetch(
     conn: &Connection,
     id: i64,
     input: &ApplicationInput,
 ) -> rusqlite::Result<Application> {
+    let previous_status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM applications WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .ok();
+
     conn.execute(
         "UPDATE applications SET
             company = ?1, role = ?2, status = ?3, source = ?4,
             posting_url = ?5, location = ?6, work_mode = ?7,
             salary_amount = ?8, salary_currency = ?9, salary_period = ?10,
             contact_name = ?11, contact_email = ?12, notes = ?13,
-            applied_at = ?14, updated_at = ?15
-         WHERE id = ?16",
+            posting_text = ?14, applied_at = ?15, next_followup_at = ?16,
+            updated_at = ?17
+         WHERE id = ?18",
         params![
             input.company,
             input.role,
@@ -108,7 +145,9 @@ fn save_and_fetch(
             input.contact_name,
             input.contact_email,
             input.notes,
+            input.posting_text,
             input.applied_at,
+            input.next_followup_at,
             now_iso(),
             id,
         ],
@@ -117,7 +156,32 @@ fn save_and_fetch(
     if deleted {
         return Err(rusqlite::Error::QueryReturnedNoRows);
     }
+    // Log stage transitions so the timeline keeps history alive.
+    if let Some(old) = previous_status {
+        if old != input.status {
+            let now = to_local_datetime();
+            insert_event(
+                conn,
+                id,
+                &now,
+                "status_change",
+                &format!("{old} → {}", input.status),
+            )?;
+        }
+    }
     fetch_application(conn, id)
+}
+
+/// Current local calendar date as `YYYY-MM-DD`.
+fn to_local_date() -> String {
+    use chrono::Local;
+    Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// Current local date and time as `YYYY-MM-DDTHH:MM`.
+fn to_local_datetime() -> String {
+    use chrono::Local;
+    Local::now().format("%Y-%m-%dT%H:%M").to_string()
 }
 
 fn validate(input: &ApplicationInput) -> Result<(), String> {
@@ -171,4 +235,335 @@ pub fn delete_application(id: i64, state: State<DbState>) -> Result<bool, String
     conn.execute("DELETE FROM applications WHERE id = ?1", params![id])
         .map_err(err_msg)?;
     Ok(true)
+}
+
+/// Inserts a timeline event row and returns its id.
+fn insert_event(
+    conn: &Connection,
+    application_id: i64,
+    occurred_at: &str,
+    kind: &str,
+    note: &str,
+) -> rusqlite::Result<i64> {
+    insert_event_linked(conn, application_id, occurred_at, kind, note, None)
+}
+
+fn insert_event_linked(
+    conn: &Connection,
+    application_id: i64,
+    occurred_at: &str,
+    kind: &str,
+    note: &str,
+    correspondence_id: Option<i64>,
+) -> rusqlite::Result<i64> {
+    let now = now_iso();
+    conn.execute(
+        "INSERT INTO application_events
+            (application_id, occurred_at, kind, note, correspondence_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![application_id, occurred_at, kind, note, correspondence_id, now],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn fetch_event(conn: &Connection, id: i64) -> rusqlite::Result<ApplicationEvent> {
+    conn.query_row(
+        "SELECT * FROM application_events WHERE id = ?1",
+        params![id],
+        event_from_row,
+    )
+}
+
+#[tauri::command]
+pub fn list_events(
+    application_id: i64,
+    state: State<DbState>,
+) -> Result<Vec<ApplicationEvent>, String> {
+    let conn = lock_db(&state)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT * FROM application_events WHERE application_id = ?1
+             ORDER BY occurred_at DESC, id DESC",
+        )
+        .map_err(err_msg)?;
+    let rows = stmt
+        .query_map(params![application_id], event_from_row)
+        .map_err(err_msg)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn add_event(
+    application_id: i64,
+    input: EventInput,
+    state: State<DbState>,
+) -> Result<ApplicationEvent, String> {
+    if !event_kind_valid(&input.kind) {
+        return Err("Unknown event kind.".into());
+    }
+    let conn = lock_db(&state)?;
+    let occurred = input
+        .occurred_at
+        .filter(|date| !date.trim().is_empty())
+        .unwrap_or_else(to_local_date);
+    let id = insert_event(&conn, application_id, &occurred, &input.kind, &input.note)
+        .map_err(err_msg)?;
+    fetch_event(&conn, id).map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn update_event(
+    id: i64,
+    input: EventInput,
+    state: State<DbState>,
+) -> Result<ApplicationEvent, String> {
+    if !event_kind_valid(&input.kind) {
+        return Err("Unknown event kind.".into());
+    }
+    let conn = lock_db(&state)?;
+    let occurred = input
+        .occurred_at
+        .filter(|date| !date.trim().is_empty())
+        .unwrap_or_else(to_local_date);
+    conn.execute(
+        "UPDATE application_events SET occurred_at = ?1, kind = ?2, note = ?3, updated_at = ?4
+         WHERE id = ?5",
+        params![occurred, input.kind, input.note, now_iso(), id],
+    )
+    .map_err(err_msg)?;
+    fetch_event(&conn, id).map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn delete_event(id: i64, state: State<DbState>) -> Result<bool, String> {
+    let conn = lock_db(&state)?;
+    conn.execute("DELETE FROM application_events WHERE id = ?1", params![id])
+        .map_err(err_msg)?;
+    Ok(true)
+}
+
+fn correspondence_kind_valid(kind: &str) -> bool {
+    matches!(kind, "email" | "call" | "meeting")
+}
+
+fn correspondence_from_row(row: &Row) -> rusqlite::Result<ApplicationCorrespondence> {
+    Ok(ApplicationCorrespondence {
+        id: row.get("id")?,
+        application_id: row.get("application_id")?,
+        kind: row.get("kind")?,
+        occurred_at: row.get("occurred_at")?,
+        meeting_mode: row.get("meeting_mode")?,
+        body: row.get("body")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn fetch_correspondence(conn: &Connection, id: i64) -> rusqlite::Result<ApplicationCorrespondence> {
+    conn.query_row(
+        "SELECT * FROM application_correspondence WHERE id = ?1",
+        params![id],
+        correspondence_from_row,
+    )
+}
+
+fn insert_correspondence(
+    conn: &Connection,
+    application_id: i64,
+    kind: &str,
+    occurred_at: &str,
+    meeting_mode: Option<&str>,
+    body: &str,
+) -> rusqlite::Result<i64> {
+    let now = now_iso();
+    conn.execute(
+        "INSERT INTO application_correspondence
+            (application_id, kind, occurred_at, meeting_mode, body, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![application_id, kind, occurred_at, meeting_mode, body, now],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Validates the correspondence payload and returns the normalized parts.
+fn validate_correspondence(input: &CorrespondenceInput) -> Result<(String, Option<String>), String> {
+    if input.body.trim().is_empty() {
+        return Err("Details/body is required.".into());
+    }
+    let kind = input
+        .kind
+        .as_deref()
+        .unwrap_or("email")
+        .trim()
+        .to_lowercase();
+    if !correspondence_kind_valid(&kind) {
+        return Err("Unknown correspondence type.".into());
+    }
+    let meeting_mode: Option<String> = if kind == "meeting" {
+        match input.meeting_mode.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+            Some(m) => {
+                if !matches!(m, "virtual" | "in_person") {
+                    return Err("Meeting mode must be virtual or in_person.".into());
+                }
+                Some(m.to_string())
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    Ok((kind, meeting_mode))
+}
+
+#[tauri::command]
+pub fn list_correspondence(
+    application_id: i64,
+    state: State<DbState>,
+) -> Result<Vec<ApplicationCorrespondence>, String> {
+    let conn = lock_db(&state)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT * FROM application_correspondence WHERE application_id = ?1
+             ORDER BY occurred_at DESC, id DESC",
+        )
+        .map_err(err_msg)?;
+    let rows = stmt
+        .query_map(params![application_id], correspondence_from_row)
+        .map_err(err_msg)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn add_correspondence(
+    application_id: i64,
+    input: CorrespondenceInput,
+    state: State<DbState>,
+) -> Result<ApplicationCorrespondence, String> {
+    let (kind, meeting_mode) = validate_correspondence(&input)?;
+    let conn = lock_db(&state)?;
+    let exists = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM applications WHERE id = ?1)",
+            params![application_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    if !exists {
+        return Err("Application not found.".to_string());
+    }
+    let occurred = input
+        .occurred_at
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(to_local_date);
+    let id = insert_correspondence(
+        &conn,
+        application_id,
+        &kind,
+        &occurred,
+        meeting_mode.as_deref(),
+        &input.body,
+    )
+    .map_err(err_msg)?;
+
+    // A first-line preview keeps the intro readable inside the body.
+    let first_line: String = first_line_of(&input.body);
+    insert_event_linked(
+        &conn,
+        application_id,
+        &occurred,
+        &kind,
+        &first_line,
+        Some(id),
+    )
+    .map_err(err_msg)?;
+
+    // Optional one-step status bump together with the correspondence item.
+    if let Some(new_status) = input
+        .follow_up_status
+        .filter(|value| !value.trim().is_empty())
+    {
+        let previous: String = conn
+            .query_row(
+                "SELECT status FROM applications WHERE id = ?1",
+                params![application_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+        if new_status != previous {
+            conn.execute(
+                "UPDATE applications SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                params![new_status, now_iso(), application_id],
+            )
+            .map_err(err_msg)?;
+            insert_event(
+                &conn,
+                application_id,
+                &occurred,
+                "status_change",
+                &format!("{previous} → {new_status}"),
+            )
+            .map_err(err_msg)?;
+        }
+    }
+
+    fetch_correspondence(&conn, id).map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn update_correspondence(
+    id: i64,
+    input: CorrespondenceInput,
+    state: State<DbState>,
+) -> Result<ApplicationCorrespondence, String> {
+    let (kind, meeting_mode) = validate_correspondence(&input)?;
+    let conn = lock_db(&state)?;
+    let occurred = input
+        .occurred_at
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(to_local_date);
+    conn.execute(
+        "UPDATE application_correspondence
+         SET kind = ?1, occurred_at = ?2, meeting_mode = ?3, body = ?4, updated_at = ?5
+         WHERE id = ?6",
+        params![kind, occurred, meeting_mode, input.body, now_iso(), id],
+    )
+    .map_err(err_msg)?;
+    // Keep the linked timeline entry in step with the edited item.
+    let first_line: String = first_line_of(&input.body);
+    conn.execute(
+        "UPDATE application_events
+         SET occurred_at = ?1, kind = ?2, note = ?3, updated_at = ?4
+         WHERE correspondence_id = ?5",
+        params![occurred, kind, first_line, now_iso(), id],
+    )
+    .map_err(err_msg)?;
+    fetch_correspondence(&conn, id).map_err(err_msg)
+}
+
+#[tauri::command]
+pub fn delete_correspondence(id: i64, state: State<DbState>) -> Result<bool, String> {
+    let conn = lock_db(&state)?;
+    // The linked timeline entry travels with the item (single source of truth).
+    conn.execute(
+        "DELETE FROM application_events WHERE correspondence_id = ?1",
+        params![id],
+    )
+    .map_err(err_msg)?;
+    conn.execute(
+        "DELETE FROM application_correspondence WHERE id = ?1",
+        params![id],
+    )
+    .map_err(err_msg)?;
+    Ok(true)
+}
+
+/// First non-empty line of a body, trimmed for use as a preview note.
+fn first_line_of(body: &str) -> String {
+    body.lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(80)
+        .collect()
 }

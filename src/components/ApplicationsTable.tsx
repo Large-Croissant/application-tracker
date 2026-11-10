@@ -6,7 +6,8 @@ interface Props {
   applications: Application[];
   /** Render pay amounts abbreviated ("$120k") instead of full ("$120,000"). */
   compactPay: boolean;
-  onEdit: (app: Application) => void;
+  /** Open the detail drawer for an application (row click). */
+  onOpen: (app: Application) => void;
   onDelete: (app: Application) => void;
 }
 
@@ -49,10 +50,21 @@ function formatTimestamp(value: string): string {
   return `${MONTHS[date.getMonth()]} ${date.getDate()}`;
 }
 
+/** True when the follow-up date exists and has already passed. */
+function isFollowupDue(app: Application): boolean {
+  if (!app.nextFollowupAt) return false;
+  return app.nextFollowupAt <= todayLocal();
+}
+
+function todayLocal(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 export default function ApplicationsTable({
   applications,
   compactPay,
-  onEdit,
+  onOpen,
   onDelete,
 }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>("updatedAt");
@@ -123,7 +135,7 @@ export default function ApplicationsTable({
                 <tr
                   key={app.id}
                   className="cursor-pointer border-b border-zinc-800/60 transition-colors hover:bg-zinc-800/40"
-                  onClick={() => onEdit(app)}
+                  onClick={() => onOpen(app)}
                 >
                   <td className="max-w-48 truncate px-3 py-2 font-medium text-zinc-100">
                     {app.company}
@@ -134,6 +146,14 @@ export default function ApplicationsTable({
                       <span className={`h-1.5 w-1.5 rounded-full ${meta.dot}`} />
                       {meta.label}
                     </span>
+                    {isFollowupDue(app) && (
+                      <span
+                        className="ml-2 inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-300"
+                        title={`Follow-up date reached (${app.nextFollowupAt})`}
+                      >
+                        Follow up
+                      </span>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-zinc-400 whitespace-nowrap">
                     {app.appliedAt ? formatDay(app.appliedAt) : "—"}

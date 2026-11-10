@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import ApplicationForm from "./components/ApplicationForm";
 import ApplicationsTable from "./components/ApplicationsTable";
+import DetailDrawer from "./components/DetailDrawer";
+import KanbanBoard from "./components/KanbanBoard";
+import StatsStrip from "./components/StatsStrip";
 import * as api from "./lib/api";
 import type { Application, ApplicationInput } from "./types";
 
@@ -39,8 +42,19 @@ export default function App() {
     localStorage.setItem("jobtracker:compactPay", compactPay ? "1" : "0");
   }, [compactPay]);
 
+  // Main view mode for the applications tab, also persisted.
+  const [viewMode, setViewMode] = useState<"table" | "board">(
+    () =>
+      (localStorage.getItem("jobtracker:viewMode") as "table" | "board" | null) ??
+      "table",
+  );
+  useEffect(() => {
+    localStorage.setItem("jobtracker:viewMode", viewMode);
+  }, [viewMode]);
+
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Application | null>(null);
+  const [detail, setDetail] = useState<Application | null>(null);
   const [saving, setSaving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -95,21 +109,21 @@ export default function App() {
     }
   }
 
+  /** Progression updates from the drawer (inline status, email bump). */
+  async function handleUpdated(fresh: Application) {
+    setApps((prev) => prev.map((a) => (a.id === fresh.id ? fresh : a)));
+    setDetail((cur) => (cur?.id === fresh.id ? fresh : cur));
+  }
+
   async function handleDelete(app: Application) {
     try {
       await api.deleteApplication(app.id);
+      setDetail((cur) => (cur?.id === app.id ? null : cur));
       await load();
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
     }
   }
-
-  const now = new Date();
-  const monthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  const active = apps.filter((a) =>
-    ["applied", "interviewing", "offer"].includes(a.status),
-  ).length;
-  const thisMonth = apps.filter((a) => (a.appliedAt ?? "").startsWith(monthPrefix)).length;
 
   return (
     <div className="flex h-full flex-col">
@@ -137,12 +151,6 @@ export default function App() {
           ))}
         </nav>
         <div className="ml-auto flex items-center gap-4 text-xs text-zinc-500">
-          <span>
-            <span className="font-semibold text-zinc-300">{active}</span> active
-          </span>
-          <span>
-            <span className="font-semibold text-zinc-300">{thisMonth}</span> this month
-          </span>
           {tab === "applications" && (
             <button className="btn-primary" onClick={openCreate}>
               + New application
@@ -161,6 +169,8 @@ export default function App() {
 
         {tab === "applications" && (
           <>
+            <StatsStrip applications={apps} />
+
             <div className="flex items-center gap-2">
               <input
                 className="input max-w-xs"
@@ -179,10 +189,12 @@ export default function App() {
                   [
                     "wishlist",
                     "applied",
+                    "acknowledged",
                     "interviewing",
                     "offer",
                     "accepted",
                     "rejected",
+                    "ghosted",
                     "withdrawn",
                   ] as const
                 ).map((s) => (
@@ -191,13 +203,25 @@ export default function App() {
                   </option>
                 ))}
               </select>
-              <button
-                className={`ml-auto text-xs ${compactPay ? "btn bg-zinc-800 text-zinc-200" : "btn-ghost"}`}
-                title="Toggle pay display between $120,000 and $120k"
-                onClick={() => setCompactPay((v) => !v)}
-              >
-                Compact pay
-              </button>
+
+              {/* Table / board toggle */}
+              <div className="ml-auto flex overflow-hidden rounded-md border border-zinc-700">
+                {([["table", "Table"], ["board", "Board"]] as const).map(
+                  ([mode, label]) => (
+                    <button
+                      key={mode}
+                      className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                        viewMode === mode
+                          ? "bg-zinc-800 text-zinc-100"
+                          : "text-zinc-500 hover:text-zinc-300"
+                      }`}
+                      onClick={() => setViewMode(mode)}
+                    >
+                      {label}
+                    </button>
+                  ),
+                )}
+              </div>
             </div>
 
             {apps.length === 0 && !loadError ? (
@@ -214,11 +238,17 @@ export default function App() {
                   + Add your first application
                 </button>
               </div>
+            ) : viewMode === "board" ? (
+              <KanbanBoard
+                applications={filtered}
+                compactPay={compactPay}
+                onOpen={setDetail}
+              />
             ) : (
               <ApplicationsTable
                 applications={filtered}
                 compactPay={compactPay}
-                onEdit={openEdit}
+                onOpen={setDetail}
                 onDelete={handleDelete}
               />
             )}
@@ -234,14 +264,34 @@ export default function App() {
         {tab === "insights" && (
           <ComingSoon
             title="Insights"
-            blurb="Pipeline board, stats, and the flowchart view of how your applications move through stages. Built in phases 2–5."
+            blurb="Deeper stats and the flowchart view of how your applications move through stages. Built in phase 5."
           />
         )}
         {tab === "settings" && (
-          <ComingSoon
-            title="Settings & Sync"
-            blurb="Dropbox connection, sync status, and data backup/export. Built in phase 4."
-          />
+          <div className="max-w-xl space-y-4">
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
+              <h3 className="mb-3 text-sm font-semibold text-zinc-300">Display</h3>
+              <label className="flex cursor-pointer items-center gap-3">
+                <input
+                  type="checkbox"
+                  checked={compactPay}
+                  onChange={(e) => setCompactPay(e.target.checked)}
+                  className="h-4 w-4 accent-zinc-600"
+                />
+                <span className="text-sm text-zinc-300">
+                  Compact pay amounts
+                  <span className="ml-2 text-zinc-500">
+                    ($120k instead of $120,000 in the table and board)
+                  </span>
+                </span>
+              </label>
+            </div>
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 text-sm text-zinc-500">
+              <h3 className="mb-1 text-sm font-semibold text-zinc-300">Sync</h3>
+              Dropbox connection, sync status, and data backup/export arrive with the
+              sync phase.
+            </div>
+          </div>
         )}
       </main>
 
@@ -252,6 +302,16 @@ export default function App() {
           error={actionError}
           onClose={() => setModalOpen(false)}
           onSave={handleSave}
+        />
+      )}
+
+      {detail && (
+        <DetailDrawer
+          app={detail}
+          onClose={() => setDetail(null)}
+          onEdit={(app) => openEdit(app)}
+          onDelete={handleDelete}
+          onUpdated={handleUpdated}
         />
       )}
     </div>

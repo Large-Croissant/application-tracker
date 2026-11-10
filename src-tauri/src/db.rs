@@ -54,12 +54,15 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         );
 
         -- Timeline log per application: recruiter call, technical interview, ...
+        -- correspondence_id links an entry to its stored correspondence item.
         CREATE TABLE IF NOT EXISTS application_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+            -- `YYYY-MM-DD`, or `YYYY-MM-DDTHH:MM` when a time is kept
             occurred_at TEXT NOT NULL,
             kind TEXT NOT NULL DEFAULT 'note',
             note TEXT NOT NULL DEFAULT '',
+            correspondence_id INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -111,9 +114,65 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        -- Correspondence on an application: one record per email, call, or meeting.
+        CREATE TABLE IF NOT EXISTS application_correspondence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+            -- email | call | meeting
+            kind TEXT NOT NULL DEFAULT 'email',
+            -- When it happened (or is scheduled): `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`
+            occurred_at TEXT NOT NULL,
+            -- Meetings only: virtual | in_person
+            meeting_mode TEXT,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_application_correspondence_app
+            ON application_correspondence(application_id);
         "#,
     )?;
-    upgrade_salary_columns(conn)
+    upgrade_salary_columns(conn)?;
+    upgrade_correspondence(conn)
+}
+
+/// One-time upgrade to the correspondence model:
+/// - renames the timeline link column `email_id` → `correspondence_id`
+/// - migrates the old `application_emails` table into `application_correspondence`
+/// - removes the placeholder "Email: ..." note events used before real linking
+fn upgrade_correspondence(conn: &Connection) -> rusqlite::Result<()> {
+    if column_exists(conn, "application_events", "email_id")?
+        && !column_exists(conn, "application_events", "correspondence_id")?
+    {
+        conn.execute_batch(
+            "ALTER TABLE application_events RENAME COLUMN email_id TO correspondence_id;",
+        )?;
+    }
+    if table_exists(conn, "application_emails")? {
+        conn.execute_batch(
+            "INSERT INTO application_correspondence
+                (id, application_id, kind, occurred_at, meeting_mode, body, created_at, updated_at)
+             SELECT id, application_id, 'email', received_at, NULL, body, created_at, updated_at
+             FROM application_emails;
+             DROP TABLE application_emails;",
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM application_events
+         WHERE kind = 'note' AND note LIKE 'Email: %' AND correspondence_id IS NULL",
+        [],
+    )?;
+    Ok(())
+}
+
+/// True when a table with this name exists in the database.
+fn table_exists(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        params![table],
+        |row| row.get::<_, bool>(0),
+    )
 }
 
 /// True when the given table has a column with this name.
