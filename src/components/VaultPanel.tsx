@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import * as api from "../lib/api";
 import { copyText } from "../lib/clipboard";
@@ -175,18 +175,15 @@ function ProfileSection({
   onChanged: (fields: ProfileField[]) => void;
 }) {
   const stored = new Map(fields.map((f) => [f.key, f.value]));
-  const ordered: { key: string; value: string; custom: boolean }[] = [
-    ...DEFAULT_FIELDS.map((key) => ({ key, value: stored.get(key) ?? "", custom: false })),
-    ...fields
-      .filter((f) => !DEFAULT_FIELDS.includes(f.key))
-      .map((f) => ({ key: f.key, value: f.value, custom: true })),
-  ];
+  /** Suggested starters the user hasn't added yet — shown as one-click chips. */
+  const suggestions = DEFAULT_FIELDS.filter((key) => !stored.has(key));
 
   // Add-field form
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const valueRef = useRef<HTMLInputElement>(null);
 
   // Row edit state
   const [editingKey, setEditingKey] = useState<string | null>(null);
@@ -221,6 +218,45 @@ function ProfileSection({
     setEditRow(null);
   }
 
+  /** Drag-reorder state: the row being dragged and the live preview order. */
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [previewOrder, setPreviewOrder] = useState<ProfileField[] | null>(null);
+  /** While dragging, the list is the preview; otherwise the stored fields. */
+  const displayRows = previewOrder ?? fields;
+
+  /** Live-reorder: the list shuffles as the drag passes over rows. */
+  function handleDragOver(index: number) {
+    if (!dragKey || !previewOrder) return;
+    const from = previewOrder.findIndex((f) => f.key === dragKey);
+    if (from === -1 || from === index) return;
+    const next = [...previewOrder];
+    const [moved] = next.splice(from, 1);
+    next.splice(index, 0, moved);
+    setPreviewOrder(next);
+  }
+
+  /** Persists the previewed order. */
+  async function persistOrder(rows: ProfileField[]) {
+    const keys = rows.map((f) => f.key);
+    onChanged(rows);
+    try {
+      await api.reorderProfile(keys);
+      onChanged(await api.listProfile());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Release (drop or cancel): preview becomes real if the order changed. */
+  function endDrag() {
+    const preview = previewOrder;
+    setDragKey(null);
+    setPreviewOrder(null);
+    if (preview && preview.some((f, i) => f.key !== fields[i]?.key)) {
+      void persistOrder(preview);
+    }
+  }
+
   return (
     <div className="max-w-2xl space-y-3">
       {error && (
@@ -231,11 +267,11 @@ function ProfileSection({
 
       <p className="text-xs text-zinc-600">
         Quick-paste fields for application forms — fill them once, copy everywhere.
-        Clearing a value removes the field.
+        This page starts blank; add only what you use. Drag rows to reorder.
       </p>
 
       <ul className="space-y-2">
-        {ordered.map((row) =>
+        {displayRows.map((row, index) =>
           editingKey === row.key ? (
             <li
               key={row.key}
@@ -281,8 +317,39 @@ function ProfileSection({
           ) : (
             <li
               key={row.key}
-              className="group flex items-center gap-3 rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2"
+              onDragOver={(e) => {
+                e.preventDefault();
+                handleDragOver(index);
+              }}
+              onDrop={(e) => e.preventDefault()}
+              onDragEnd={endDrag}
+              className={`group flex items-center gap-3 rounded-md border bg-zinc-900/60 px-3 py-2 ${
+                row.key === dragKey ? "border-zinc-700 opacity-40" : "border-zinc-800"
+              }`}
             >
+              {/* Drag handle — the only draggable part of the row. */}
+              {displayRows.length > 1 && (
+                <span
+                  draggable
+                  onDragStart={(e) => {
+                    e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("text/plain", row.key);
+                    setDragKey(row.key);
+                    setPreviewOrder(fields);
+                  }}
+                  className="cursor-grab select-none text-zinc-600 hover:text-zinc-400 active:cursor-grabbing"
+                  title="Drag to reorder"
+                >
+                  <svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor" aria-hidden>
+                    <circle cx="2.5" cy="3" r="1.3" />
+                    <circle cx="7.5" cy="3" r="1.3" />
+                    <circle cx="2.5" cy="8" r="1.3" />
+                    <circle cx="7.5" cy="8" r="1.3" />
+                    <circle cx="2.5" cy="13" r="1.3" />
+                    <circle cx="7.5" cy="13" r="1.3" />
+                  </svg>
+                </span>
+              )}
               <div className="min-w-0 flex-1">
                 <div className="text-xs font-medium text-zinc-500">{row.key}</div>
                 <div
@@ -306,11 +373,47 @@ function ProfileSection({
                 >
                   Edit
                 </button>
+                <button
+                  className="btn-ghost px-2 py-0.5 text-xs text-red-400 hover:text-red-300"
+                  disabled={saving}
+                  title="Delete this field"
+                  onClick={async () => {
+                    if (window.confirm(`Delete "${row.key}" from your profile?`)) {
+                      setEditingKey(null);
+                      setEditRow(null);
+                      await save(row.key, "");
+                    }
+                  }}
+                >
+                  Delete
+                </button>
               </span>
             </li>
           ),
         )}
       </ul>
+
+      {/* Suggested starters — one click pre-fills the add form */}
+      {suggestions.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-zinc-600">Add:</span>
+          {suggestions.map((key) => (
+            <button
+              key={key}
+              type="button"
+              className="rounded-full border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:border-sky-700 hover:text-sky-300"
+              title={`Add a ${key} field`}
+              onClick={() => {
+                setNewKey(key);
+                setNewValue("");
+                valueRef.current?.focus();
+              }}
+            >
+              + {key}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Add a custom field */}
       <form
@@ -325,6 +428,7 @@ function ProfileSection({
             placeholder="New field name (e.g. Salary expectation)"
           />
           <input
+            ref={valueRef}
             className={`${inputCls} flex-1`}
             value={newValue}
             onChange={(e) => setNewValue(e.target.value)}

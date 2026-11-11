@@ -1,8 +1,8 @@
 use crate::db::{now_iso, DbState};
 use crate::models::{
     Application, ApplicationCorrespondence, ApplicationEvent, ApplicationInput,
-    CorrespondenceInput, EventInput, PreparedAnswer, ProfileField, ReferenceContact,
-    AnswerInput, ReferenceInput, ResumeInput, ResumeVersion,
+    CorrespondenceInput, EventInput, ImportBatch, ImportResult, PreparedAnswer, ProfileField,
+    ReferenceContact, AnswerInput, ReferenceInput, ResumeInput, ResumeVersion,
 };
 use std::sync::MutexGuard;
 use rusqlite::{params, Connection, Row};
@@ -245,6 +245,28 @@ pub fn delete_application(id: i64, state: State<DbState>) -> Result<bool, String
     conn.execute("DELETE FROM applications WHERE id = ?1", params![id])
         .map_err(err_msg)?;
     Ok(true)
+}
+
+/// Deletes a batch of applications in one transaction (timeline events and
+/// correspondence go with them via FK cascade). Returns rows deleted.
+#[tauri::command]
+pub fn delete_applications(ids: Vec<i64>, state: State<DbState>) -> Result<usize, String> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let conn = lock_db(&state)?;
+    let tx = conn.unchecked_transaction().map_err(err_msg)?;
+    let mut deleted = 0_usize;
+    {
+        let mut stmt = tx
+            .prepare("DELETE FROM applications WHERE id = ?1")
+            .map_err(err_msg)?;
+        for id in &ids {
+            deleted += stmt.execute(params![id]).map_err(err_msg)?;
+        }
+    }
+    tx.commit().map_err(err_msg)?;
+    Ok(deleted)
 }
 
 /// Inserts a timeline event row and returns its id.
@@ -831,6 +853,95 @@ pub fn delete_sample_data(state: State<DbState>) -> Result<usize, String> {
     Ok(deleted)
 }
 
+/// Imports a batch of applications with prebuilt timeline events in one
+/// transaction — used by the Flosa import. Nothing partial is written: any
+/// invalid row aborts the whole batch.
+///
+/// `created_at`/`updated_at` reflect the application's real history (applied
+/// date and latest event) instead of the import moment, so the table doesn't
+/// claim everything was touched today.
+#[tauri::command]
+pub fn import_applications(
+    batch: ImportBatch,
+    state: State<DbState>,
+) -> Result<ImportResult, String> {
+    let conn = lock_db(&state)?;
+    let tx = conn.unchecked_transaction().map_err(err_msg)?;
+    let mut replaced = 0_usize;
+    if batch.replace {
+        replaced = tx
+            .execute("DELETE FROM applications WHERE source = 'Flosa import'", [])
+            .map_err(err_msg)?;
+    }
+    let mut imported = 0_usize;
+    let mut events_total = 0_usize;
+    for (i, item) in batch.applications.iter().enumerate() {
+        if item.app.company.trim().is_empty() || item.app.role.trim().is_empty() {
+            return Err(format!(
+                "Import row {} is missing a company or role.",
+                i + 1
+            ));
+        }
+        for ev in &item.events {
+            if !event_kind_valid(&ev.kind) {
+                return Err(format!(
+                    "Import row {} has unknown event kind '{}'.",
+                    i + 1,
+                    ev.kind
+                ));
+            }
+            if ev.occurred_at.trim().is_empty() {
+                return Err(format!("Import row {} has an event with no date.", i + 1));
+            }
+        }
+        let id = insert_application(&tx, &item.app).map_err(err_msg)?;
+        imported += 1;
+
+        // Real-history timestamps: applied date as creation, latest event
+        // (or the applied date) as last update. Dates are `YYYY-MM-DD`.
+        let created_at = item
+            .app
+            .applied_at
+            .clone()
+            .unwrap_or_else(now_iso)
+            .split('T')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let mut latest = created_at.clone();
+        for ev in &item.events {
+            let d = ev.occurred_at.split('T').next().unwrap_or("").to_string();
+            if d.as_str() > latest.as_str() {
+                latest = d;
+            }
+            insert_event(&tx, id, &ev.occurred_at, &ev.kind, &ev.note).map_err(err_msg)?;
+            events_total += 1;
+        }
+        let stamp = |d: &str| format!("{d}T00:00:00.000Z");
+        tx.execute(
+            "UPDATE applications SET created_at = ?1, updated_at = ?2 WHERE id = ?3",
+            params![stamp(&created_at), stamp(&latest), id],
+        )
+        .map_err(err_msg)?;
+    }
+    tx.commit().map_err(err_msg)?;
+    Ok(ImportResult { imported, events: events_total, replaced })
+}
+
+/// Removes applications imported earlier from Flosa (matched by source tag),
+/// so a corrected import can replace them cleanly. Returns rows deleted.
+#[tauri::command]
+pub fn delete_imported_flosa(state: State<DbState>) -> Result<usize, String> {
+    let conn = lock_db(&state)?;
+    let deleted = conn
+        .execute(
+            "DELETE FROM applications WHERE source = 'Flosa import'",
+            [],
+        )
+        .map_err(err_msg)?;
+    Ok(deleted)
+}
+
 // ---------- Vault: profile, references, answers, resumes ----------
 
 fn profile_from_row(row: &Row) -> rusqlite::Result<ProfileField> {
@@ -845,7 +956,7 @@ fn profile_from_row(row: &Row) -> rusqlite::Result<ProfileField> {
 pub fn list_profile(state: State<DbState>) -> Result<Vec<ProfileField>, String> {
     let conn = lock_db(&state)?;
     let mut stmt = conn
-        .prepare("SELECT * FROM profile ORDER BY field_key ASC")
+        .prepare("SELECT * FROM profile ORDER BY sort_order ASC, field_key ASC")
         .map_err(err_msg)?;
     let rows = stmt.query_map([], profile_from_row).map_err(err_msg)?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(err_msg)
@@ -878,12 +989,28 @@ pub fn set_profile(
         });
     }
     conn.execute(
-        "INSERT INTO profile (field_key, value, updated_at) VALUES (?1, ?2, ?3)
+        "INSERT INTO profile (field_key, value, updated_at, sort_order)
+         VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM profile))
          ON CONFLICT(field_key) DO UPDATE SET value = ?2, updated_at = ?3",
         params![key, value, now],
     )
     .map_err(err_msg)?;
     Ok(ProfileField { key, value, updated_at: now })
+}
+
+/// Stores the display order of profile fields (the frontend sends the full
+/// ordered key list after a reorder).
+#[tauri::command]
+pub fn reorder_profile(keys: Vec<String>, state: State<DbState>) -> Result<(), String> {
+    let conn = lock_db(&state)?;
+    for (i, key) in keys.iter().enumerate() {
+        conn.execute(
+            "UPDATE profile SET sort_order = ?1 WHERE field_key = ?2",
+            params![i as i64, key],
+        )
+        .map_err(err_msg)?;
+    }
+    Ok(())
 }
 
 fn reference_from_row(row: &Row) -> rusqlite::Result<ReferenceContact> {

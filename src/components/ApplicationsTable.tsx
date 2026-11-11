@@ -9,6 +9,8 @@ interface Props {
   /** Open the detail drawer for an application (row click). */
   onOpen: (app: Application) => void;
   onDelete: (app: Application) => void;
+  /** Deletes several applications at once (bulk selection actions). */
+  onDeleteMany: (apps: Application[]) => void;
 }
 
 type SortKey =
@@ -66,11 +68,15 @@ export default function ApplicationsTable({
   compactPay,
   onOpen,
   onDelete,
+  onDeleteMany,
 }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>("updatedAt");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   /** Row id pending deletion confirmation. */
   const [confirmingId, setConfirmingId] = useState<number | null>(null);
+  /** Row ids checked for bulk actions. */
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [confirmBulk, setConfirmBulk] = useState(false);
 
   const sorted = useMemo(() => {
     const dir = sortDir === "asc" ? 1 : -1;
@@ -84,6 +90,40 @@ export default function ApplicationsTable({
       return cmp * dir;
     });
   }, [applications, sortKey, sortDir]);
+
+  const selectedApps = useMemo(
+    () => sorted.filter((a) => selected.has(a.id)),
+    [sorted, selected],
+  );
+  const allChecked = sorted.length > 0 && selectedApps.length === sorted.length;
+
+  function toggleAll() {
+    if (allChecked) setSelected(new Set());
+    else setSelected(new Set(sorted.map((a) => a.id)));
+    setConfirmBulk(false);
+  }
+
+  function toggleOne(id: number) {
+    setSelected((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setConfirmBulk(false);
+  }
+
+  function handleBulkDelete() {
+    if (selectedApps.length === 0) return;
+    if (!confirmBulk) {
+      setConfirmBulk(true);
+      setTimeout(() => setConfirmBulk(false), 4000);
+      return;
+    }
+    onDeleteMany(selectedApps);
+    setSelected(new Set());
+    setConfirmBulk(false);
+  }
 
   function toggleSort(key: SortKey) {
     if (key === sortKey) {
@@ -111,6 +151,16 @@ export default function ApplicationsTable({
         <table className="w-full text-left text-sm">
           <thead className="sticky top-0 z-10 bg-zinc-900 text-xs uppercase tracking-wide text-zinc-500">
             <tr>
+              <th className="w-10 border-b border-zinc-800 px-3 py-2">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-zinc-500"
+                  checked={allChecked}
+                  onChange={toggleAll}
+                  title="Select all"
+                  aria-label="Select all applications"
+                />
+              </th>
               {COLUMNS.map((col) => (
                 <th
                   key={col.key}
@@ -134,9 +184,23 @@ export default function ApplicationsTable({
               return (
                 <tr
                   key={app.id}
-                  className="cursor-pointer border-b border-zinc-800/60 transition-colors hover:bg-zinc-800/40"
+                  className={`cursor-pointer border-b border-zinc-800/60 transition-colors hover:bg-zinc-800/40 ${
+                    selected.has(app.id) ? "bg-sky-950/40" : ""
+                  }`}
                   onClick={() => onOpen(app)}
                 >
+                  <td
+                    className="px-3 py-2"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-zinc-500"
+                      checked={selected.has(app.id)}
+                      onChange={() => toggleOne(app.id)}
+                      aria-label={`Select ${app.company} application`}
+                    />
+                  </td>
                   <td className="max-w-48 truncate px-3 py-2 font-medium text-zinc-100">
                     {app.company}
                   </td>
@@ -194,6 +258,30 @@ export default function ApplicationsTable({
           </tbody>
         </table>
       </div>
+      {selectedApps.length > 0 && (
+        <div className="flex items-center justify-between border-t border-zinc-800 bg-zinc-900 px-3 py-2 text-xs">
+          <span className="text-zinc-300">
+            {selectedApps.length} selected
+          </span>
+          <span className="flex items-center gap-2">
+            <button
+              className="btn-ghost px-2 py-1"
+              onClick={() => {
+                setSelected(new Set());
+                setConfirmBulk(false);
+              }}
+            >
+              Clear
+            </button>
+            <button
+              className={confirmBulk ? "btn-danger px-3 py-1" : "btn px-3 py-1"}
+              onClick={handleBulkDelete}
+            >
+              {confirmBulk ? "Click again to confirm" : "Delete selected"}
+            </button>
+          </span>
+        </div>
+      )}
       <div className="border-t border-zinc-800 px-3 py-1.5 text-xs text-zinc-600">
         {applications.length} {applications.length === 1 ? "application" : "applications"}
       </div>

@@ -4,10 +4,12 @@ mod models;
 
 use commands::{
     add_correspondence, add_event, add_prepared_answer, add_reference, add_resume,
-    create_application, delete_application, delete_correspondence, delete_event,
-    delete_prepared_answer, delete_reference, delete_resume, delete_sample_data, list_all_events,
-    list_applications, list_correspondence, list_events, list_prepared_answers, list_profile,
-    list_references, list_resumes, seed_sample_data, set_profile, update_application,
+    create_application, delete_application, delete_applications, delete_correspondence,
+    delete_event,
+    delete_prepared_answer, delete_reference, delete_resume, delete_sample_data,
+    delete_imported_flosa, import_applications, list_all_events, list_applications,
+    list_correspondence, list_events, list_prepared_answers, list_profile, list_references,
+    list_resumes, reorder_profile, seed_sample_data, set_profile, update_application,
     update_correspondence, update_event, update_prepared_answer, update_reference, update_resume,
 };
 use db::DbState;
@@ -30,10 +32,14 @@ pub fn run() {
             create_application,
             update_application,
             delete_application,
+            delete_applications,
             list_events,
             list_all_events,
             seed_sample_data,
             delete_sample_data,
+            import_applications,
+            delete_imported_flosa,
+            reorder_profile,
             add_event,
             update_event,
             delete_event,

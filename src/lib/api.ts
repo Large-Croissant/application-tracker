@@ -36,6 +36,11 @@ export function deleteApplication(id: number): Promise<boolean> {
   return invoke("delete_application", { id });
 }
 
+/** Deletes several applications at once (cascade removes their timelines). */
+export function deleteApplications(ids: number[]): Promise<number> {
+  return invoke("delete_applications", { ids });
+}
+
 /** Builds a full ApplicationInput from an existing Application, so fields
  * other than the one being changed pass through untouched (e.g. inline
  * status changes in the detail drawer). */
@@ -73,6 +78,20 @@ export function listAllEvents(): Promise<ApplicationEvent[]> {
 /** Creates a batch of "Sample · ..." applications with full histories. */
 export function seedSampleData(): Promise<number> {
   return invoke("seed_sample_data");
+}
+
+/** Creates a batch of applications with prebuilt timeline events (Flosa import).
+ * With `replace`, rows imported earlier are removed in the same transaction. */
+export function importApplications(
+  applications: unknown[],
+  replace: boolean,
+): Promise<{ imported: number; events: number; replaced: number }> {
+  return invoke("import_applications", { batch: { applications, replace } });
+}
+
+/** Removes applications imported earlier from Flosa (matched by source tag). */
+export function deleteImportedFlosa(): Promise<number> {
+  return invoke("delete_imported_flosa");
 }
 
 /** Removes the sample applications again (matched by their prefix). */
@@ -131,6 +150,11 @@ export function setProfile(key: string, value: string): Promise<ProfileField> {
 
 export function listProfile(): Promise<ProfileField[]> {
   return invoke("list_profile");
+}
+
+/** Saves the display order of profile fields (full ordered key list). */
+export function reorderProfile(keys: string[]): Promise<void> {
+  return invoke("reorder_profile", { keys });
 }
 
 export function listReferences(): Promise<ReferenceContact[]> {

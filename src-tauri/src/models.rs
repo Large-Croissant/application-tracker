@@ -83,6 +83,43 @@ pub struct EventInput {
     pub note: String,
 }
 
+/// Timeline event prebuilt by an importer (e.g. Flosa import).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportEventInput {
+    pub occurred_at: String,
+    pub kind: String,
+    pub note: String,
+}
+
+/// One application plus its prebuilt timeline, from an import batch.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportApplicationInput {
+    #[serde(flatten)]
+    pub app: ApplicationInput,
+    pub events: Vec<ImportEventInput>,
+}
+
+/// A whole-file import batch: everything lands in one transaction.
+/// When `replace` is set, applications imported earlier (source tag
+/// "Flosa import") are removed in the same transaction first.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBatch {
+    pub applications: Vec<ImportApplicationInput>,
+    #[serde(default)]
+    pub replace: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResult {
+    pub imported: usize,
+    pub events: usize,
+    pub replaced: usize,
+}
+
 /// One touch with the company: an email, a call, or a meeting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -138,6 +138,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     upgrade_salary_columns(conn)?;
     upgrade_correspondence(conn)?;
     ensure_column(conn, "applications", "salary_amount_max", "REAL")?;
+    // Profile field display order (vault reorder).
+    ensure_column(conn, "profile", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
     // Copy-paste vault: resume text lives with its version record.
     ensure_column(
         conn,

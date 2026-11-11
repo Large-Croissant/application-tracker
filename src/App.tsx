@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import ApplicationForm from "./components/ApplicationForm";
 import ApplicationsTable from "./components/ApplicationsTable";
 import DetailDrawer from "./components/DetailDrawer";
+import ImportPanel from "./components/ImportPanel";
 import InsightsPanel from "./components/InsightsPanel";
 import KanbanBoard from "./components/KanbanBoard";
 import StatsStrip from "./components/StatsStrip";
@@ -111,6 +112,16 @@ export default function App() {
     try {
       await api.deleteApplication(app.id);
       setDetail((cur) => (cur?.id === app.id ? null : cur));
+      await load();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function handleDeleteMany(apps: Application[]) {
+    try {
+      await api.deleteApplications(apps.map((a) => a.id));
+      setDetail((cur) => (apps.some((a) => a.id === cur?.id) ? null : cur));
       await load();
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
@@ -242,6 +253,7 @@ export default function App() {
                 compactPay={compactPay}
                 onOpen={setDetail}
                 onDelete={handleDelete}
+                onDeleteMany={handleDeleteMany}
               />
             )}
           </>
@@ -253,6 +265,7 @@ export default function App() {
         )}
         {tab === "settings" && (
           <div className="max-w-xl space-y-4">
+            <ImportPanel onImported={load} />
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
               <h3 className="mb-3 text-sm font-semibold text-zinc-300">Display</h3>
               <label className="flex cursor-pointer items-center gap-3">
