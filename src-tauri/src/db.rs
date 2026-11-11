@@ -25,7 +25,7 @@ pub fn open_db(app_data_dir: &Path) -> Result<Connection, String> {
 
 /// Schema for the full app (all pillars), created idempotently.
 /// Kept in one place so the synced snapshot always contains the complete dataset.
-fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // Raw string literal so SQL comments may contain quote characters.
     conn.execute_batch(
         r#"

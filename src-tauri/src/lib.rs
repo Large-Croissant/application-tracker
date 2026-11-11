@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod models;
+mod sync;
 
 use commands::{
     add_correspondence, add_event, add_prepared_answer, add_reference, add_resume,
@@ -13,6 +14,10 @@ use commands::{
     update_correspondence, update_event, update_prepared_answer, update_reference, update_resume,
 };
 use db::DbState;
+use sync::{
+    sync_check_cloud, sync_complete_connect, sync_disconnect, sync_get_info, sync_pull,
+    sync_push, sync_save_settings, sync_start_connect, SyncState,
+};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -25,6 +30,7 @@ pub fn run() {
             let conn = db::open_db(&app_data_dir)
                 .expect("failed to open the JobTracker database");
             app.manage(DbState(std::sync::Mutex::new(conn)));
+            app.manage(SyncState::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -61,6 +67,14 @@ pub fn run() {
             add_resume,
             update_resume,
             delete_resume,
+            sync_get_info,
+            sync_save_settings,
+            sync_start_connect,
+            sync_complete_connect,
+            sync_disconnect,
+            sync_push,
+            sync_pull,
+            sync_check_cloud,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

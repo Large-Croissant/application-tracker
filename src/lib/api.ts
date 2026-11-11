@@ -157,6 +157,62 @@ export function reorderProfile(keys: string[]): Promise<void> {
   return invoke("reorder_profile", { keys });
 }
 
+// ---------- Cloud sync (Dropbox) ----------
+
+export interface SyncInfo {
+  connected: boolean;
+  hasAppKey: boolean;
+  encrypt: boolean;
+  rememberPassphrase: boolean;
+  lastSyncAt: string;
+  pendingPkce: boolean;
+}
+
+export interface CloudStatus {
+  exists: boolean;
+  modified: string;
+  revMatches: boolean;
+  lastSyncAt: string;
+}
+
+export function syncGetInfo(): Promise<SyncInfo> {
+  return invoke("sync_get_info");
+}
+
+export function syncSaveSettings(opts: {
+  appKey?: string;
+  encrypt?: boolean;
+  rememberPassphrase?: boolean;
+  passphrase?: string;
+}): Promise<void> {
+  return invoke("sync_save_settings", opts);
+}
+
+/** Starts the OAuth flow; opens Dropbox in the browser, returns the URL. */
+export function syncStartConnect(): Promise<string> {
+  return invoke("sync_start_connect");
+}
+
+export function syncCompleteConnect(code: string): Promise<void> {
+  return invoke("sync_complete_connect", { code });
+}
+
+export function syncDisconnect(): Promise<void> {
+  return invoke("sync_disconnect");
+}
+
+export function syncPush(passphrase: string | null): Promise<string> {
+  return invoke("sync_push", { passphrase });
+}
+
+export function syncPull(passphrase: string | null): Promise<string> {
+  return invoke("sync_pull", { passphrase });
+}
+
+export function syncCheckCloud(): Promise<CloudStatus> {
+  return invoke("sync_check_cloud");
+}
+
 export function listReferences(): Promise<ReferenceContact[]> {
   return invoke("list_references");
 }

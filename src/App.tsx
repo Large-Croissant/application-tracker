@@ -4,6 +4,7 @@ import ApplicationsTable from "./components/ApplicationsTable";
 import DetailDrawer from "./components/DetailDrawer";
 import ImportPanel from "./components/ImportPanel";
 import InsightsPanel from "./components/InsightsPanel";
+import SyncPanel from "./components/SyncPanel";
 import KanbanBoard from "./components/KanbanBoard";
 import StatsStrip from "./components/StatsStrip";
 import VaultPanel from "./components/VaultPanel";
@@ -112,6 +113,20 @@ export default function App() {
     try {
       await api.deleteApplication(app.id);
       setDetail((cur) => (cur?.id === app.id ? null : cur));
+      await load();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function handleMove(app: Application, toStatus: string) {
+    if (app.status === toStatus) return;
+    try {
+      const updated = await api.updateApplication(app.id, {
+        ...api.applicationToInput(app),
+        status: toStatus,
+      });
+      setDetail((cur) => (cur?.id === updated.id ? updated : cur));
       await load();
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
@@ -246,6 +261,7 @@ export default function App() {
                 applications={filtered}
                 compactPay={compactPay}
                 onOpen={setDetail}
+                onMove={handleMove}
               />
             ) : (
               <ApplicationsTable
@@ -266,6 +282,7 @@ export default function App() {
         {tab === "settings" && (
           <div className="max-w-xl space-y-4">
             <ImportPanel onImported={load} />
+            <SyncPanel onSynced={load} />
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
               <h3 className="mb-3 text-sm font-semibold text-zinc-300">Display</h3>
               <label className="flex cursor-pointer items-center gap-3">
