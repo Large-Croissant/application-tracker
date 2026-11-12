@@ -217,6 +217,23 @@ export default function SyncPanel({ onSynced }: { onSynced: () => void }) {
             </span>
           </label>
 
+          <label className="flex cursor-pointer items-start gap-2 text-xs text-zinc-400">
+            <input
+              type="checkbox"
+              checked={info.autoSync}
+              onChange={(e) => void run(async () => {
+                await api.syncSaveSettings({ autoSync: e.target.checked });
+                return undefined;
+              })}
+              className="mt-0.5 h-4 w-4 accent-zinc-600"
+            />
+            <span>
+              <span className="text-zinc-200">Push automatically on close</span> — uploads a
+              snapshot when the app exits (uses the remembered passphrase; skipped when
+              there is none). Results land in the header dot next launch.
+            </span>
+          </label>
+
           {info.encrypt && (
             <div className="flex flex-wrap items-center gap-2">
               <input

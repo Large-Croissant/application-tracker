@@ -163,9 +163,12 @@ export interface SyncInfo {
   connected: boolean;
   hasAppKey: boolean;
   encrypt: boolean;
+  autoSync: boolean;
   rememberPassphrase: boolean;
   lastSyncAt: string;
   pendingPkce: boolean;
+  /** True when local data differs from what the cloud last received. */
+  dirty: boolean;
 }
 
 export interface CloudStatus {
@@ -182,6 +185,7 @@ export function syncGetInfo(): Promise<SyncInfo> {
 export function syncSaveSettings(opts: {
   appKey?: string;
   encrypt?: boolean;
+  autoSync?: boolean;
   rememberPassphrase?: boolean;
   passphrase?: string;
 }): Promise<void> {

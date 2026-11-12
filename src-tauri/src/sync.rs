@@ -57,15 +57,25 @@ struct SyncConfig {
     refresh_token: String,
     /// End-to-end encryption on by default.
     encrypt: bool,
+    /// Push the snapshot automatically when the app closes.
+    #[serde(default = "default_true")]
+    auto_sync: bool,
     remember_passphrase: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     passphrase: String,
     /// Dropbox revision seen at the last push/pull (conflict detection).
     last_known_rev: String,
     last_sync_at: String,
+    /// SHA-256 of the snapshot as of the last push/pull; a different digest
+    /// now means there are local changes not yet in the cloud.
+    last_pushed_digest: String,
     /// PKCE verifier between "Connect" and "paste the code".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pkce_verifier: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -184,6 +194,25 @@ fn unpack_blob(blob: &[u8], passphrase: &str) -> Result<Json, String> {
 }
 
 // ---------- snapshot export / import ----------
+
+/// Stable content hash of a snapshot. Only the table data participates —
+/// volatile fields (exportedAt) and metadata are excluded, so equal data
+/// → equal digest regardless of when it was exported.
+fn snapshot_digest(snapshot: &Json) -> String {
+    let mut hasher = Sha256::new();
+    for table in TABLES {
+        let empty = Json::Null;
+        let bytes = serde_json::to_vec(snapshot.get(table).unwrap_or(&empty))
+            .unwrap_or_default();
+        hasher.update(&bytes);
+        hasher.update(b"\x00"); // table boundary
+    }
+    hex(&hasher.finalize())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02X}")).collect()
+}
 
 fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>, String> {
     let mut stmt = conn
@@ -402,29 +431,43 @@ fn lock_db_sync<'a>(
 
 // ---------- commands ----------
 
-/// Non-secret view of the sync config for the Settings UI.
+/// Non-secret view of the sync config for the Settings UI (and header dot).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncInfo {
     pub connected: bool,
     pub has_app_key: bool,
     pub encrypt: bool,
+    pub auto_sync: bool,
     pub remember_passphrase: bool,
     pub last_sync_at: String,
     pub pending_pkce: bool,
+    /// True when local data differs from what the cloud last received.
+    pub dirty: bool,
 }
 
 #[tauri::command]
-pub fn sync_get_info(app: tauri::AppHandle) -> Result<SyncInfo, String> {
+pub fn sync_get_info(app: tauri::AppHandle, db: tauri::State<'_, DbState>) -> Result<SyncInfo, String> {
     let config = load_config(&app)?;
-    let pending = config.refresh_token.is_empty() && !config.pkce_verifier.is_empty();
+    let connected = !config.refresh_token.is_empty();
+    // Dirty check: hash the current local data and compare with the digest
+    // remembered at the last push/pull. Only meaningful when connected.
+    let dirty = if connected {
+        let conn = lock_db_sync(&db)?;
+        let digest = snapshot_digest(&export_snapshot(&conn)?);
+        digest != config.last_pushed_digest
+    } else {
+        false
+    };
     Ok(SyncInfo {
-        connected: !config.refresh_token.is_empty(),
+        connected,
         has_app_key: !config.app_key.is_empty(),
         encrypt: config.encrypt,
+        auto_sync: config.auto_sync,
         remember_passphrase: config.remember_passphrase,
         last_sync_at: config.last_sync_at.clone(),
-        pending_pkce: pending,
+        pending_pkce: config.refresh_token.is_empty() && !config.pkce_verifier.is_empty(),
+        dirty,
     })
 }
 
@@ -434,6 +477,7 @@ pub fn sync_save_settings(
     app: tauri::AppHandle,
     app_key: Option<String>,
     encrypt: Option<bool>,
+    auto_sync: Option<bool>,
     remember_passphrase: Option<bool>,
     passphrase: Option<String>,
 ) -> Result<(), String> {
@@ -443,6 +487,9 @@ pub fn sync_save_settings(
     }
     if let Some(e) = encrypt {
         config.encrypt = e;
+    }
+    if let Some(a) = auto_sync {
+        config.auto_sync = a;
     }
     if let Some(r) = remember_passphrase {
         config.remember_passphrase = r;
@@ -566,24 +613,25 @@ pub fn sync_disconnect(app: tauri::AppHandle) -> Result<(), String> {
     save_config(&app, &config)
 }
 
-/// Pushes a (possibly encrypted) snapshot of everything to Dropbox.
-/// Returns a human summary; conflicts with remote changes are surfaced
-/// in `sync_status` before this is pressed.
-#[tauri::command]
-pub async fn sync_push(
-    app: tauri::AppHandle,
-    db: tauri::State<'_, DbState>,
-    passphrase: Option<String>,
+/// Core push: snapshot → (encrypt) → upload → remember digest/rev/time.
+/// `pass_override` (from the UI) wins over the remembered passphrase.
+/// Used by the command and by the auto-push on app exit.
+pub(crate) async fn push_snapshot(
+    app: &tauri::AppHandle,
+    db: &tauri::State<'_, DbState>,
+    pass_override: Option<&str>,
 ) -> Result<String, String> {
-    let config = load_config(&app)?;
-    let pass = passphrase
-        .or(Some(config.passphrase.clone()))
-        .filter(|p| !p.is_empty());
+    let config = load_config(app)?;
+    let pass = pass_override
+        .map(str::to_string)
+        .or_else(|| Some(config.passphrase.clone()).filter(|p| !p.is_empty()));
 
-    // Snapshot while holding the DB lock, then drop it before any await.
-    let snapshot = {
-        let conn = lock_db_sync(&db)?;
-        export_snapshot(&conn)?
+    // Snapshot + digest while holding the DB lock, then drop it before any await.
+    let (snapshot, digest) = {
+        let conn = lock_db_sync(db)?;
+        let snap = export_snapshot(&conn)?;
+        let d = snapshot_digest(&snap);
+        (snap, d)
     };
     let encrypt = config.encrypt;
     if encrypt && pass.is_none() {
@@ -595,8 +643,9 @@ pub async fn sync_push(
 
     let mut updated = config;
     updated.last_known_rev = rev;
+    updated.last_pushed_digest = digest;
     updated.last_sync_at = now_iso();
-    save_config(&app, &updated)?;
+    save_config(app, &updated)?;
     let n = snapshot
         .get("applications")
         .and_then(Json::as_array)
@@ -608,6 +657,22 @@ pub async fn sync_push(
         blob.len() / 1024,
         if encrypt { "encrypted" } else { "not encrypted" }
     ))
+}
+
+/// Pushes a (possibly encrypted) snapshot of everything to Dropbox.
+/// Conflicts with remote changes are surfaced via `sync_check_cloud`.
+#[tauri::command]
+pub async fn sync_push(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, DbState>,
+    passphrase: Option<String>,
+) -> Result<String, String> {
+    push_snapshot(
+        &app,
+        &db,
+        passphrase.as_deref().filter(|p| !p.is_empty()),
+    )
+    .await
 }
 
 /// Downloads the cloud snapshot, decrypts it, and replaces the local data.
@@ -640,11 +705,45 @@ pub async fn sync_pull(
         if let Some(rev) = rev {
             updated.last_known_rev = rev;
         }
+        // Local data now equals the cloud snapshot: the dot shows synced.
+        updated.last_pushed_digest = snapshot_digest(&snapshot);
         updated.last_sync_at = now_iso();
         save_config(&app, &updated)?;
         Ok(format!(
             "Pulled and applied the cloud snapshot: {imported} rows restored. A backup of your previous data is at pre-pull-backup.json."
         ))
+    }
+}
+
+/// Auto-sync on app close: pushes the snapshot if connected, auto-sync is
+/// on, and (with E2E) a remembered passphrase exists. Runs synchronously on
+/// the exit path so the upload finishes before the process dies; the result
+/// is appended to `sync.log` and visible via the header dot next launch.
+pub fn auto_push_on_exit(app: &tauri::AppHandle) {
+    let outcome = tauri::async_runtime::block_on(async {
+        let config = load_config(app)?;
+        if !config.auto_sync || config.refresh_token.is_empty() {
+            return Ok("auto-sync skipped (off or not connected)".to_string());
+        }
+        if config.encrypt && config.passphrase.trim().is_empty() {
+            return Ok("auto-sync skipped: encrypted but no remembered passphrase".to_string());
+        }
+        let db = app.state::<DbState>();
+        push_snapshot(app, &db, None).await
+    });
+    let line = match outcome {
+        Ok(msg) => format!("{} auto-sync OK: {msg}", now_iso()),
+        Err(e) => format!("{} auto-sync FAILED: {e}", now_iso()),
+    };
+    if let Ok(dir) = app.path().app_data_dir() {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("sync.log"))
+        {
+            let _ = writeln!(f, "{line}");
+        }
     }
 }
 
@@ -702,6 +801,29 @@ mod tests {
         let blob = pack_blob(&snapshot, false, "").unwrap();
         let out = unpack_blob(&blob, "").unwrap();
         assert_eq!(out, snapshot);
+    }
+
+    #[test]
+    fn digest_stable_across_exports() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        crate::db::migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO applications (company, role, status, created_at, updated_at)
+             VALUES ('Acme', 'Dev', 'applied', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        // Two exports at different moments must hash identically (the
+        // volatile exportedAt field is excluded from the digest).
+        let d1 = snapshot_digest(&export_snapshot(&conn).unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let d2 = snapshot_digest(&export_snapshot(&conn).unwrap());
+        assert_eq!(d1, d2);
+        // Any data change must change the digest.
+        conn.execute("UPDATE applications SET status = 'rejected'", []).unwrap();
+        let d3 = snapshot_digest(&export_snapshot(&conn).unwrap());
+        assert_ne!(d1, d3);
     }
 
     #[test]

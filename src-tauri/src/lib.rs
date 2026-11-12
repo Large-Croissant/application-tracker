@@ -18,7 +18,7 @@ use sync::{
     sync_check_cloud, sync_complete_connect, sync_disconnect, sync_get_info, sync_pull,
     sync_push, sync_save_settings, sync_start_connect, SyncState,
 };
-use tauri::Manager;
+use tauri::{Manager, RunEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -76,6 +76,12 @@ pub fn run() {
             sync_pull,
             sync_check_cloud,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Upload the (encrypted) snapshot before the process dies.
+            if let RunEvent::ExitRequested { .. } = event {
+                sync::auto_push_on_exit(app);
+            }
+        });
 }

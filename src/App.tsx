@@ -7,6 +7,7 @@ import InsightsPanel from "./components/InsightsPanel";
 import SyncPanel from "./components/SyncPanel";
 import KanbanBoard from "./components/KanbanBoard";
 import StatsStrip from "./components/StatsStrip";
+import SyncDot from "./components/SyncDot";
 import VaultPanel from "./components/VaultPanel";
 import * as api from "./lib/api";
 import type { Application, ApplicationInput } from "./types";
@@ -51,11 +52,14 @@ export default function App() {
   const [detail, setDetail] = useState<Application | null>(null);
   const [saving, setSaving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  /** Bumped on every data load so the sync dot re-checks its state. */
+  const [dataStamp, setDataStamp] = useState(0);
 
   const load = useCallback(async () => {
     try {
       setApps(await api.listApplications());
       setLoadError(null);
+      setDataStamp((n) => n + 1);
     } catch (e) {
       setLoadError(String(e));
     }
@@ -169,6 +173,7 @@ export default function App() {
           ))}
         </nav>
         <div className="ml-auto flex items-center gap-4 text-xs text-zinc-500">
+          <SyncDot refreshKey={dataStamp} onOpenSettings={() => setTab("settings")} />
           {tab === "applications" && (
             <button className="btn-primary" onClick={openCreate}>
               + New application
