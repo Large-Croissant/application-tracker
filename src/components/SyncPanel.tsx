@@ -84,12 +84,6 @@ export default function SyncPanel({ onSynced }: { onSynced: () => void }) {
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
-      <h3 className="mb-1 text-sm font-semibold text-zinc-300">Cloud sync (Dropbox)</h3>
-      <p className="mb-3 text-xs text-zinc-500">
-        One encrypted snapshot of everything, in your own Dropbox. Push and pull are manual
-        buttons — nothing syncs without you clicking.
-      </p>
-
       {error && (
         <div className="mb-2 rounded-md border border-red-900 bg-red-950/50 px-3 py-2 text-sm text-red-300">
           {error}

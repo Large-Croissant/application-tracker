@@ -79,13 +79,7 @@ export default function ImportPanel({ onImported }: Props) {
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
-      <h3 className="mb-1 text-sm font-semibold text-zinc-300">Import from Flosa</h3>
-      <p className="mb-3 text-xs text-zinc-500">
-        Pick the <span className="text-zinc-300">flosa_full.json</span> captured from my.flosa.app.
-        You'll see a full mapping preview before anything is written.
-      </p>
-
-      {/* How to get the file — the collection script ships with the app. */}
+      {/* Don't have the file yet? Get it from your Flosa account. */}
       <div className="mb-3 rounded-md border border-zinc-800 bg-zinc-900 p-3">
         <div className="mb-2 text-xs font-medium text-zinc-400">
           Don't have the file yet? Get it from your Flosa account:

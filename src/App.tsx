@@ -1,16 +1,18 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { setTimeFormat, useTimeFormat } from "./lib/datetime";
 import ApplicationForm from "./components/ApplicationForm";
 import ApplicationsTable from "./components/ApplicationsTable";
 import DetailDrawer from "./components/DetailDrawer";
 import ImportPanel from "./components/ImportPanel";
 import InsightsPanel from "./components/InsightsPanel";
+import SampleDataCard from "./components/SampleDataCard";
 import SyncPanel from "./components/SyncPanel";
 import KanbanBoard from "./components/KanbanBoard";
 import StatsStrip from "./components/StatsStrip";
 import SyncDot from "./components/SyncDot";
 import VaultPanel from "./components/VaultPanel";
 import * as api from "./lib/api";
-import type { Application, ApplicationInput } from "./types";
+import { STATUSES, type Application, type ApplicationEvent, type ApplicationInput } from "./types";
 
 const TABS = [
   { id: "applications", label: "Applications" },
@@ -20,6 +22,27 @@ const TABS = [
 ] as const;
 
 type Tab = (typeof TABS)[number]["id"];
+
+/** A labeled settings section: small uppercase heading, one-line hint, card body. */
+function Section({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint: string;
+  children: ReactNode;
+}) {
+  return (
+    <section>
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+        {title}
+      </h3>
+      <p className="mt-0.5 text-xs text-zinc-600">{hint}</p>
+      <div className="mt-2">{children}</div>
+    </section>
+  );
+}
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("applications");
@@ -54,10 +77,22 @@ export default function App() {
   const [actionError, setActionError] = useState<string | null>(null);
   /** Bumped on every data load so the sync dot re-checks its state. */
   const [dataStamp, setDataStamp] = useState(0);
+  const timeFormat = useTimeFormat();
+
+  /** Stage-history filter: show apps that were ever in this stage. */
+  const [stageFilter, setStageFilter] = useState("any");
+  const [allEvents, setAllEvents] = useState<ApplicationEvent[]>([]);
 
   const load = useCallback(async () => {
     try {
-      setApps(await api.listApplications());
+      // Events too: the "ever reached" stage filter is built from the
+      // status_change trail every application carries.
+      const [apps, events] = await Promise.all([
+        api.listApplications(),
+        api.listAllEvents(),
+      ]);
+      setApps(apps);
+      setAllEvents(events);
       setLoadError(null);
       setDataStamp((n) => n + 1);
     } catch (e) {
@@ -69,8 +104,30 @@ export default function App() {
     load();
   }, [load]);
 
+  /** app id → every stage it has demonstrably been in (status_change trail
+   * "old → new" events, both endpoints, plus the current status). */
+  const stagesByApp = useMemo(() => {
+    const map = new Map<number, Set<string>>();
+    const add = (id: number, stage: string) => {
+      if (!stage) return;
+      let set = map.get(id);
+      if (!set) map.set(id, (set = new Set()));
+      set.add(stage);
+    };
+    for (const ev of allEvents) {
+      if (ev.kind !== "status_change") continue;
+      const parts = ev.note.split(" → ");
+      if (parts.length !== 2) continue;
+      add(ev.applicationId, parts[0].trim());
+      add(ev.applicationId, parts[1].trim());
+    }
+    for (const a of apps) add(a.id, a.status);
+    return map;
+  }, [allEvents, apps]);
+
   const filtered = apps.filter((app) => {
     if (statusFilter !== "all" && app.status !== statusFilter) return false;
+    if (stageFilter !== "any" && !stagesByApp.get(app.id)?.has(stageFilter)) return false;
     if (!search.trim()) return true;
     const needle = search.toLowerCase();
     const haystack = `${app.company} ${app.role} ${app.notes} ${app.location} ${app.contactName}`;
@@ -226,6 +283,20 @@ export default function App() {
                   </option>
                 ))}
               </select>
+              <select
+                className="input max-w-48"
+                value={stageFilter}
+                onChange={(e) => setStageFilter(e.target.value)}
+                aria-label="Filter by stage history"
+                title="Shows applications that were ever in this stage, even if they've since moved on"
+              >
+                <option value="any">Ever reached: any stage</option>
+                {STATUSES.map((s) => (
+                  <option key={s.value} value={s.value}>
+                    Ever reached: {s.label}
+                  </option>
+                ))}
+              </select>
 
               {/* Table / board toggle */}
               <div className="ml-auto flex overflow-hidden rounded-md border border-zinc-700">
@@ -282,33 +353,79 @@ export default function App() {
 
         {tab === "vault" && <VaultPanel />}
         {tab === "insights" && (
-          <InsightsPanel applications={apps} onDataChanged={load} />
+          <InsightsPanel applications={apps} />
         )}
         {tab === "settings" && (
-          <div className="max-w-xl space-y-4">
-            <ImportPanel onImported={load} />
-            <SyncPanel onSynced={load} />
-            <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
-              <h3 className="mb-3 text-sm font-semibold text-zinc-300">Display</h3>
-              <label className="flex cursor-pointer items-center gap-3">
-                <input
-                  type="checkbox"
-                  checked={compactPay}
-                  onChange={(e) => setCompactPay(e.target.checked)}
-                  className="h-4 w-4 accent-zinc-600"
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            <div className="max-w-xl space-y-6 pb-8">
+              <Section
+                title="Display"
+                hint="Formatting only — safe to change anytime."
+              >
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
+                  <label className="flex cursor-pointer items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={compactPay}
+                      onChange={(e) => setCompactPay(e.target.checked)}
+                      className="h-4 w-4 accent-zinc-600"
+                    />
+                    <span className="text-sm text-zinc-300">
+                      Compact pay amounts
+                      <span className="ml-2 text-zinc-500">
+                        ($120k instead of $120,000 in the table and board)
+                      </span>
+                    </span>
+                  </label>
+                  <div className="mt-3 flex items-center gap-3">
+                    <span className="text-sm text-zinc-300">Time format</span>
+                    <div className="flex overflow-hidden rounded-md border border-zinc-700">
+                      {(
+                        [
+                          ["12", "12-hour (9:30 PM)"],
+                          ["24", "24-hour (21:30)"],
+                        ] as const
+                      ).map(([f, label]) => (
+                        <button
+                          key={f}
+                          className={`px-3 py-1 text-xs font-medium transition-colors ${
+                            timeFormat === f
+                              ? "bg-zinc-800 text-zinc-100"
+                              : "text-zinc-500 hover:text-zinc-300"
+                          }`}
+                          onClick={() => setTimeFormat(f)}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </Section>
+
+              <Section
+                title="Cloud sync"
+                hint="One encrypted snapshot of everything, in your own Dropbox — also pushes automatically when you close the app."
+              >
+                <SyncPanel onSynced={load} />
+              </Section>
+
+              <Section
+                title="Data import"
+                hint="Pick the flosa_full.json captured from my.flosa.app — full mapping preview before anything is written."
+              >
+                <ImportPanel onImported={load} />
+              </Section>
+
+              <Section
+                title="Developer"
+                hint="Fake data for trying out the app — never touches your real applications."
+              >
+                <SampleDataCard
+                  sampleCount={apps.filter((a) => a.company.startsWith("Sample · ")).length}
+                  onDataChanged={load}
                 />
-                <span className="text-sm text-zinc-300">
-                  Compact pay amounts
-                  <span className="ml-2 text-zinc-500">
-                    ($120k instead of $120,000 in the table and board)
-                  </span>
-                </span>
-              </label>
-            </div>
-            <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 text-sm text-zinc-500">
-              <h3 className="mb-1 text-sm font-semibold text-zinc-300">Sync</h3>
-              Dropbox connection, sync status, and data backup/export arrive with the
-              sync phase.
+              </Section>
             </div>
           </div>
         )}

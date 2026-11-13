@@ -9,6 +9,7 @@ import {
   joinDateTime,
   splitDateTime,
   todayLocal,
+  useTimeFormat,
 } from "../lib/datetime";
 import {
   CORRESPONDENCE_KINDS,
@@ -20,6 +21,7 @@ import {
   type CorrespondenceKind,
 } from "../types";
 import StatusMenu from "./StatusMenu";
+import TimePicker from "./TimePicker";
 
 interface Props {
   app: Application;
@@ -85,6 +87,8 @@ export default function DetailDrawer({
   onDelete,
   onUpdated,
 }: Props) {
+  // Subscribe so time displays re-render when the 12/24h setting changes.
+  useTimeFormat();
   const [tab, setTab] = useState<Tab>("overview");
   const [events, setEvents] = useState<ApplicationEvent[]>([]);
   const [items, setItems] = useState<ApplicationCorrespondence[]>([]);
@@ -493,12 +497,11 @@ export default function DetailDrawer({
                     onChange={(e) => setDraft((d) => ({ ...d, date: e.target.value }))}
                     aria-label="Date"
                   />
-                  <input
-                    type="time"
-                    className="input max-w-28 px-2 py-1 text-xs"
+                  <TimePicker
+                    className="max-w-28 px-2 py-1 text-xs"
                     value={draft.time}
-                    onChange={(e) => setDraft((d) => ({ ...d, time: e.target.value }))}
-                    aria-label="Time (optional)"
+                    onChange={(time) => setDraft((d) => ({ ...d, time }))}
+                    ariaLabel="Time (optional)"
                     title="Time (optional)"
                   />
                   {/* Meeting mode */}
@@ -633,12 +636,11 @@ export default function DetailDrawer({
                     onChange={(e) => setNoteDate(e.target.value)}
                     aria-label="Note date"
                   />
-                  <input
-                    type="time"
-                    className="input max-w-28 px-2 py-1 text-xs"
+                  <TimePicker
+                    className="max-w-28 px-2 py-1 text-xs"
                     value={noteTime}
-                    onChange={(e) => setNoteTime(e.target.value)}
-                    aria-label="Time (optional)"
+                    onChange={setNoteTime}
+                    ariaLabel="Time (optional)"
                     title="Time (optional)"
                   />
                 </div>
@@ -781,6 +783,8 @@ function CorrespondenceCard({
   onCancelEdit: () => void;
   savingEdit: boolean;
 }) {
+  // Subscribe so time displays re-render when the 12/24h setting changes.
+  useTimeFormat();
   const km = correspondenceKindMeta(item.kind);
   const event = isPlanned(item.occurredAt);
 
@@ -817,12 +821,12 @@ function CorrespondenceCard({
             onChange={(e) => onEditDraft({ ...editDraft, date: e.target.value })}
             aria-label="Date"
           />
-          <input
-            type="time"
-            className="input max-w-28 px-2 py-1 text-xs"
+          <TimePicker
+            className="max-w-28 px-2 py-1 text-xs"
             value={editDraft.time}
-            onChange={(e) => onEditDraft({ ...editDraft, time: e.target.value })}
-            aria-label="Time (optional)"
+            onChange={(time) => onEditDraft({ ...editDraft, time })}
+            ariaLabel="Time (optional)"
+            title="Time (optional)"
           />
           {kind === "meeting" && (
             <select

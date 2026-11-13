@@ -1,13 +1,10 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { STATUSES, type Application, type Status } from "../types";
 import FlowChart from "./FlowChart";
 import ErrorBoundary from "./ErrorBoundary";
-import * as api from "../lib/api";
 
 interface Props {
   applications: Application[];
-  /** Called after the sample-data commands add/remove applications. */
-  onDataChanged?: () => void;
 }
 
 const INTERVIEWED_SET: Status[] = ["interviewing", "offer", "accepted"];
@@ -76,7 +73,7 @@ function Rate(n: number, d: number): string {
 }
 
 /** Full-page Insights: conversion numbers, funnel, stage mix, outcomes, volume. */
-export default function InsightsPanel({ applications, onDataChanged }: Props) {
+export default function InsightsPanel({ applications }: Props) {
   const count = (set: Status[]) =>
     applications.filter((a) => set.includes(a.status as Status)).length;
 
@@ -127,55 +124,6 @@ export default function InsightsPanel({ applications, onDataChanged }: Props) {
     };
   }, [applications]);
 
-  const [sampleBusy, setSampleBusy] = useState(false);
-  const [sampleError, setSampleError] = useState<string | null>(null);
-  const sampleCount = applications.filter((a) => a.company.startsWith("Sample · ")).length;
-
-  async function runSample(kind: "seed" | "delete") {
-    setSampleBusy(true);
-    setSampleError(null);
-    try {
-      const n = kind === "seed" ? await api.seedSampleData() : await api.deleteSampleData();
-      onDataChanged?.();
-      if (kind === "delete" && n === 0) setSampleError("No sample applications found to remove.");
-    } catch (e) {
-      setSampleError(String(e));
-    } finally {
-      setSampleBusy(false);
-    }
-  }
-
-  const sampleToolbar = (
-    <div className="flex flex-wrap items-center justify-end gap-2">
-      <span className="mr-auto text-[11px] text-zinc-600">
-        Looking at it before real data arrives? Sample rows are named{" "}
-        <span className="text-zinc-400">Sample · …</span> so you can drop them in one click.
-        {sampleCount > 0 && (
-          <span className="ml-1 text-zinc-500">{sampleCount} sample rows present.</span>
-        )}
-      </span>
-      {sampleCount > 0 && (
-        <button
-          className="btn-ghost px-2 py-1 text-xs disabled:opacity-50"
-          disabled={sampleBusy}
-          onClick={() => runSample("delete")}
-        >
-          Remove sample data
-        </button>
-      )}
-      <button
-        className="btn-ghost px-2 py-1 text-xs disabled:opacity-50"
-        disabled={sampleBusy}
-        onClick={() => runSample("seed")}
-      >
-        {sampleBusy ? "working…" : "+ Add 42 sample applications"}
-      </button>
-    </div>
-  );
-  const sampleErrorNote = sampleError && (
-    <p className="text-right text-xs text-red-300">{sampleError}</p>
-  );
-
   if (data.total === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-zinc-800 text-center">
@@ -183,8 +131,9 @@ export default function InsightsPanel({ applications, onDataChanged }: Props) {
         <p className="max-w-sm text-sm text-zinc-500">
           Insights appear once you have applications to analyze.
         </p>
-        <div className="mt-4 w-full max-w-xl px-4">{sampleToolbar}</div>
-        {sampleErrorNote}
+        <p className="max-w-sm text-xs text-zinc-600">
+          Want to look around first? Sample data can be added from Settings → Developer.
+        </p>
       </div>
     );
   }
@@ -194,12 +143,6 @@ export default function InsightsPanel({ applications, onDataChanged }: Props) {
 
   return (
     <div className="min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
-      {/* Sample-data controls (before real/Flosa data arrives) */}
-      <div className="space-y-0.5">
-        {sampleToolbar}
-        {sampleErrorNote}
-      </div>
-
       {/* Conversion numbers */}
       <section>
         <h3 className="mb-2 text-xs font-semibold text-zinc-500">Conversion</h3>

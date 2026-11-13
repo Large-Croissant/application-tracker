@@ -179,6 +179,16 @@ export default function ApplicationsTable({
             </tr>
           </thead>
           <tbody>
+            {sorted.length === 0 && (
+              <tr>
+                <td
+                  colSpan={COLUMNS.length + 2}
+                  className="px-3 py-8 text-center text-sm text-zinc-600"
+                >
+                  No applications match the current filters.
+                </td>
+              </tr>
+            )}
             {sorted.map((app) => {
               const meta = statusMeta(app.status);
               return (
