@@ -3,7 +3,7 @@ import * as api from "../lib/api";
 import type { CloudStatus, SyncInfo } from "../lib/api";
 
 /** Settings → Cloud sync: Dropbox OAuth connect, E2E encryption toggle,
- * and manual push/pull of an encrypted snapshot of everything. */
+ * and a single "Sync now" (pull-merge + push) of everything. */
 export default function SyncPanel({ onSynced }: { onSynced: () => void }) {
   const [info, setInfo] = useState<SyncInfo | null>(null);
   const [appKey, setAppKey] = useState("");
@@ -54,17 +54,9 @@ export default function SyncPanel({ onSynced }: { onSynced: () => void }) {
     });
   }
 
-  async function push() {
+  async function syncNow() {
     await run(async () => {
-      const msg = await api.syncPush(passphrase || null);
-      onSynced();
-      return msg;
-    });
-  }
-
-  async function pull() {
-    await run(async () => {
-      const msg = await api.syncPull(passphrase || null);
+      const msg = await api.syncCycle(passphrase || null);
       onSynced();
       return msg;
     });
@@ -78,7 +70,7 @@ export default function SyncPanel({ onSynced }: { onSynced: () => void }) {
       if (status.revMatches) {
         return "Cloud file matches the last sync from this device — no conflict.";
       }
-      return "⚠ The Dropbox file changed after this device's last sync — someone else pushed, or this is a new device. Pull to bring that data here (a backup of this device's data is saved first).";
+      return "⚠ The Dropbox file changed after this device's last sync — someone else pushed, or this is a new device. Sync now to merge that data here (a backup of this device's data is saved first).";
     });
   }
 
@@ -222,9 +214,9 @@ export default function SyncPanel({ onSynced }: { onSynced: () => void }) {
               className="mt-0.5 h-4 w-4 accent-zinc-600"
             />
             <span>
-              <span className="text-zinc-200">Push automatically on close</span> — uploads a
-              snapshot when the app exits (uses the remembered passphrase; skipped when
-              there is none). Results land in the header dot next launch.
+              <span className="text-zinc-200">Sync automatically on close</span> — merges any
+              cloud changes and uploads a snapshot when the app exits (uses the remembered
+              passphrase; skipped when there is none). Results land in the header dot next launch.
             </span>
           </label>
 
@@ -263,11 +255,8 @@ export default function SyncPanel({ onSynced }: { onSynced: () => void }) {
           )}
 
           <div className="flex flex-wrap items-center gap-2">
-            <button className="btn-primary" disabled={busy} onClick={() => void push()}>
-              {busy ? "Working…" : "Push to Dropbox"}
-            </button>
-            <button className="btn" disabled={busy} onClick={() => void pull()}>
-              Pull from Dropbox
+            <button className="btn-primary" disabled={busy} onClick={() => void syncNow()}>
+              {busy ? "Syncing…" : "Sync now"}
             </button>
             <button className="btn-ghost px-2 py-1 text-xs" disabled={busy} onClick={() => void checkCloud()}>
               Check cloud

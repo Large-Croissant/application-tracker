@@ -11,6 +11,69 @@ pub fn now_iso() -> String {
 /// Wrapper for the shared SQLite connection managed by Tauri.
 pub struct DbState(pub std::sync::Mutex<Connection>);
 
+// ---------- tombstones (two-way sync delete propagation) ----------
+
+/// Records deletions in `sync_tombstones` so other devices merge them away.
+/// `uuids` are the stable row identities.
+pub(crate) fn record_tombstones(
+    conn: &Connection,
+    table: &str,
+    uuids: &[String],
+) -> rusqlite::Result<()> {
+    if uuids.is_empty() {
+        return Ok(());
+    }
+    let now = now_iso();
+    let mut stmt = conn.prepare(
+        "INSERT INTO sync_tombstones (table_name, uuid, deleted_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT (table_name, uuid) DO UPDATE SET deleted_at = MAX(deleted_at, excluded.deleted_at)",
+    )?;
+    for uuid in uuids {
+        if uuid.is_empty() {
+            continue;
+        }
+        stmt.execute(params![table, uuid, now])?;
+    }
+    Ok(())
+}
+
+/// Tombstones rows by local id, looking up their uuids first.
+pub(crate) fn tombstone_by_ids(
+    conn: &Connection,
+    table: &str,
+    ids: &[i64],
+) -> rusqlite::Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare(&format!("SELECT uuid FROM {table} WHERE id = ?1"))?;
+    let mut uuids = Vec::with_capacity(ids.len());
+    for id in ids {
+        let uuid: String = stmt.query_row(params![id], |row| row.get(0)).unwrap_or_default();
+        if !uuid.is_empty() {
+            uuids.push(uuid);
+        }
+    }
+    record_tombstones(conn, table, &uuids)
+}
+
+/// Tombstones an application and everything cascaded with it (timeline
+/// events, correspondence) — the children die via FK cascade, so their
+/// uuids are captured before the delete.
+pub(crate) fn tombstone_app_tree(conn: &Connection, app_id: i64) -> rusqlite::Result<()> {
+    tombstone_by_ids(conn, "applications", &[app_id])?;
+    for table in ["application_events", "application_correspondence"] {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT uuid FROM {table} WHERE application_id = ?1"
+        ))?;
+        let uuids: Vec<String> = stmt
+            .query_map(params![app_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        record_tombstones(conn, table, &uuids)?;
+    }
+    Ok(())
+}
+
 /// Opens (or creates) the database inside the app-data directory and runs migrations.
 pub fn open_db(app_data_dir: &Path) -> Result<Connection, String> {
     std::fs::create_dir_all(app_data_dir)
@@ -146,7 +209,85 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         "resume_versions",
         "content",
         "TEXT NOT NULL DEFAULT ''",
-    )
+    )?;
+    migrate_sync_v2(conn)
+}
+
+/// Tables whose rows need a device-independent identity for two-way sync.
+/// (profile is key-stable and excluded.)
+const UUID_TABLES: [&str; 6] = [
+    "applications",
+    "application_events",
+    "application_correspondence",
+    "reference_contacts",
+    "prepared_answers",
+    "resume_versions",
+];
+
+/// Two-way sync groundwork: stable `uuid` per row (backfilled for existing
+/// data), and a tombstone table so deletions can propagate between devices.
+pub(crate) fn migrate_sync_v2(conn: &Connection) -> rusqlite::Result<()> {
+    let batch = String::from(
+        r#"
+        CREATE TABLE IF NOT EXISTS sync_tombstones (
+            table_name TEXT NOT NULL,
+            uuid TEXT NOT NULL,
+            deleted_at TEXT NOT NULL,
+            PRIMARY KEY (table_name, uuid)
+        );
+        "#,
+    );
+    conn.execute_batch(&batch)?;
+    // One ALTER per table so a partially-migrated database can resume.
+    for table in UUID_TABLES {
+        if let Err(e) =
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN uuid TEXT NOT NULL DEFAULT '';"))
+        {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(e);
+            }
+        }
+    }
+    // Unique index so uuid lookups are exact and fast.
+    for table in UUID_TABLES {
+        conn.execute_batch(&format!(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uuid ON {table}(uuid) WHERE uuid <> '';"
+        ))?;
+    }
+    // Backfill uuids for rows that predate two-way sync (v4 UUIDs).
+    for table in UUID_TABLES {
+        let needs: Vec<i64> = {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT id FROM {table} WHERE uuid = '' ORDER BY id"
+            ))?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for id in needs {
+            conn.execute(
+                &format!("UPDATE {table} SET uuid = ?1 WHERE id = ?2"),
+                rusqlite::params![uuid::Uuid::new_v4().to_string(), id],
+            )?;
+        }
+    }
+    // Every future row gets a uuid automatically, no matter which code path
+    // inserted it (merge inserts that carry one skip the trigger via the
+    // WHEN clause). The expression builds a random v4-shaped UUID in SQL.
+    let uuid_expr = "lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) \
+         || '-4' || substr(lower(hex(randomblob(2))), 2) || '-' || \
+         substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) \
+         || '-' || lower(hex(randomblob(6)))";
+    for table in UUID_TABLES {
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER IF NOT EXISTS trg_{table}_uuid
+             AFTER INSERT ON {table}
+             WHEN NEW.uuid = ''
+             BEGIN
+                 UPDATE {table} SET uuid = {uuid_expr} WHERE id = NEW.id;
+             END;"
+        ))?;
+    }
+    Ok(())
 }
 
 /// One-time upgrade to the correspondence model:

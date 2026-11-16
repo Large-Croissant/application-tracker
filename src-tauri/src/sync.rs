@@ -15,7 +15,7 @@ use chacha20poly1305::aead::rand_core::RngCore;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rusqlite::types::Value as SqlValue;
-use rusqlite::Connection;
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value as Json};
 use sha2::{Digest, Sha256};
@@ -24,7 +24,7 @@ use std::sync::Mutex;
 use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
 
-use crate::db::{now_iso, DbState};
+use crate::db::{now_iso, record_tombstones, DbState};
 
 /// Encrypted/unsigned blob magic: version byte follows ("1" = encrypted,
 /// "0" = plaintext JSON, only when the user turned E2E off).
@@ -200,19 +200,30 @@ fn unpack_blob(blob: &[u8], passphrase: &str) -> Result<Json, String> {
     }
 }
 
-// ---------- snapshot export / import ----------
+// ---------- snapshot export / import (v2: uuid-based, mergeable) ----------
 
-/// Stable content hash of a snapshot. Only the table data participates —
-/// volatile fields (exportedAt) and metadata are excluded, so equal data
-/// → equal digest regardless of when it was exported.
+/// Root keys of a v2 snapshot that participate in the content digest.
+const SNAPSHOT_KEYS: [&str; 8] = [
+    "resume_versions",
+    "prepared_answers",
+    "reference_contacts",
+    "profile",
+    "applications",
+    "application_events",
+    "application_correspondence",
+    "tombstones",
+];
+
+/// Stable content hash of a snapshot. Only the snapshot keys participate —
+/// volatile fields (exportedAt) are excluded, so equal data → equal digest.
 fn snapshot_digest(snapshot: &Json) -> String {
     let mut hasher = Sha256::new();
-    for table in TABLES {
+    for key in SNAPSHOT_KEYS {
         let empty = Json::Null;
-        let bytes = serde_json::to_vec(snapshot.get(table).unwrap_or(&empty))
+        let bytes = serde_json::to_vec(snapshot.get(key).unwrap_or(&empty))
             .unwrap_or_default();
         hasher.update(&bytes);
-        hasher.update(b"\x00"); // table boundary
+        hasher.update(b"\x00"); // key boundary
     }
     hex(&hasher.finalize())
 }
@@ -235,43 +246,243 @@ fn err(e: rusqlite::Error) -> String {
     format!("Sync database error: {e}")
 }
 
-/// Exports every table as an array of column→value objects.
+type SqlCol = (&'static str, &'static str); // (SQL column, JSON key)
+
+fn json_from_sql(v: SqlValue) -> Json {
+    match v {
+        SqlValue::Null => Json::Null,
+        SqlValue::Integer(n) => json!(n),
+        SqlValue::Real(f) => json!(f),
+        SqlValue::Text(s) => json!(s),
+        SqlValue::Blob(b) => json!(STANDARD.encode(b)),
+    }
+}
+
+/// Exports one table as an array of JSON objects keyed by `cols`.
+fn export_table(conn: &Connection, table: &str, cols: &[SqlCol]) -> Result<Vec<Json>, String> {
+    let sql = format!(
+        "SELECT {} FROM {table}",
+        cols.iter().map(|(c, _)| *c).collect::<Vec<_>>().join(", ")
+    );
+    let mut stmt = conn.prepare(&sql).map_err(err)?;
+    let mut rows = stmt.query([]).map_err(err)?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().map_err(err)? {
+        let mut obj = Map::new();
+        for (i, (_, key)) in cols.iter().enumerate() {
+            let v: SqlValue = row.get(i).map_err(err)?;
+            obj.insert(key.to_string(), json_from_sql(v));
+        }
+        out.push(Json::Object(obj));
+    }
+    Ok(out)
+}
+
+/// Local id → uuid map for FK resolution during export/merge.
+fn id_to_uuid_map(
+    conn: &Connection,
+    table: &str,
+) -> Result<std::collections::HashMap<i64, String>, String> {
+    let mut stmt = conn
+        .prepare(&format!("SELECT id, uuid FROM {table} WHERE uuid <> ''"))
+        .map_err(err)?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+        .map_err(err)?;
+    rows.collect::<rusqlite::Result<_>>().map_err(err)
+}
+
+// ---------- column maps (shared by export and merge) ----------
+
+/// Content columns per synced table: (SQL column, JSON key). Export and
+/// merge both use these so the two directions can never drift. The uuid and
+/// local-FK columns are handled separately by each side.
+const APP_COLS: &[SqlCol] = &[
+    ("company", "company"),
+    ("role", "role"),
+    ("status", "status"),
+    ("source", "source"),
+    ("posting_url", "postingUrl"),
+    ("location", "location"),
+    ("work_mode", "workMode"),
+    ("salary_amount", "salaryAmount"),
+    ("salary_amount_max", "salaryAmountMax"),
+    ("salary_currency", "salaryCurrency"),
+    ("salary_period", "salaryPeriod"),
+    ("contact_name", "contactName"),
+    ("contact_email", "contactEmail"),
+    ("notes", "notes"),
+    ("posting_text", "postingText"),
+    ("applied_at", "appliedAt"),
+    ("next_followup_at", "nextFollowupAt"),
+    ("created_at", "createdAt"),
+    ("updated_at", "updatedAt"),
+];
+const EVENT_COLS: &[SqlCol] = &[
+    ("occurred_at", "occurredAt"),
+    ("kind", "kind"),
+    ("note", "note"),
+    ("created_at", "createdAt"),
+    ("updated_at", "updatedAt"),
+];
+const CORR_COLS: &[SqlCol] = &[
+    ("kind", "kind"),
+    ("occurred_at", "occurredAt"),
+    ("meeting_mode", "meetingMode"),
+    ("body", "body"),
+    ("created_at", "createdAt"),
+    ("updated_at", "updatedAt"),
+];
+const REF_COLS: &[SqlCol] = &[
+    ("name", "name"),
+    ("relationship", "relationship"),
+    ("title", "title"),
+    ("company", "company"),
+    ("email", "email"),
+    ("phone", "phone"),
+    ("linkedin", "linkedin"),
+    ("notes", "notes"),
+    ("created_at", "createdAt"),
+    ("updated_at", "updatedAt"),
+];
+const ANSWER_COLS: &[SqlCol] = &[
+    ("title", "title"),
+    ("body", "body"),
+    ("category", "category"),
+    ("created_at", "createdAt"),
+    ("updated_at", "updatedAt"),
+];
+const RESUME_COLS: &[SqlCol] = &[
+    ("name", "name"),
+    ("file_name", "fileName"),
+    ("notes", "notes"),
+    ("content", "content"),
+    ("created_at", "createdAt"),
+    ("updated_at", "updatedAt"),
+];
+/// profile is key-stable: `field_key` is both the SQL key and the sync
+/// identity (tombstones record it under the table name "profile").
+const PROFILE_COLS: &[SqlCol] = &[
+    ("value", "value"),
+    ("sort_order", "sortOrder"),
+    ("updated_at", "updatedAt"),
+];
+
+/// Key column first, then the content columns (key never duplicated).
+fn with_key(key_col: &'static str, key_json: &'static str, cols: &[SqlCol]) -> Vec<SqlCol> {
+    let mut out = Vec::with_capacity(cols.len() + 1);
+    out.push((key_col, key_json));
+    out.extend(
+        cols.iter()
+            .copied()
+            .filter(|(c, _)| *c != key_col),
+    );
+    out
+}
+
+/// Exports a v2 snapshot: uuid identities, uuid-based FK links (local integer
+/// ids are device-private and never leave the machine), and tombstones.
 fn export_snapshot(conn: &Connection) -> Result<Json, String> {
+    let resume_map = id_to_uuid_map(conn, "resume_versions")?;
+    let app_map = id_to_uuid_map(conn, "applications")?;
+    let corr_map = id_to_uuid_map(conn, "application_correspondence")?;
+
     let mut root = Map::new();
     root.insert("app".into(), json!("jobtracker"));
-    root.insert("schemaVersion".into(), json!(1));
+    root.insert("version".into(), json!(2));
     root.insert("exportedAt".into(), json!(now_iso()));
-    for table in TABLES {
-        let cols = column_names(conn, table)?;
-        let mut stmt = conn
-            .prepare(&format!("SELECT * FROM {table}"))
-            .map_err(err)?;
-        let mut rows_out: Vec<Json> = Vec::new();
-        let mut rows = stmt.query([]).map_err(err)?;
-        while let Some(row) = rows.next().map_err(err)? {
-            let mut obj = Map::new();
-            for (i, col) in cols.iter().enumerate() {
-                let v: SqlValue = row.get(i).map_err(err)?;
-                obj.insert(
-                    col.clone(),
-                    match v {
-                        SqlValue::Null => Json::Null,
-                        SqlValue::Integer(n) => json!(n),
-                        SqlValue::Real(f) => json!(f),
-                        SqlValue::Text(s) => json!(s),
-                        SqlValue::Blob(b) => json!(STANDARD.encode(b)),
-                    },
-                );
-            }
-            rows_out.push(Json::Object(obj));
-        }
-        root.insert(table.to_string(), json!(rows_out));
+
+    let mut app_cols = with_key("uuid", "uuid", APP_COLS);
+    app_cols.push(("resume_version_id", "resumeVersionId")); // mapped below
+    let mut apps = export_table(conn, "applications", &app_cols)?;
+    for row in &mut apps {
+        let Some(obj) = row.as_object_mut() else { continue };
+        let rid = obj.remove("resumeVersionId").and_then(|v| v.as_i64());
+        let ru = rid.and_then(|id| resume_map.get(&id)).cloned();
+        obj.insert("resumeVersionUuid".into(), json!(ru));
     }
+    root.insert("applications".into(), Json::Array(apps));
+
+    let mut event_cols = with_key("uuid", "uuid", EVENT_COLS);
+    event_cols.push(("application_id", "applicationId")); // mapped below
+    event_cols.push(("correspondence_id", "correspondenceId"));
+    let mut events = export_table(conn, "application_events", &event_cols)?;
+    for row in &mut events {
+        let Some(obj) = row.as_object_mut() else { continue };
+        let aid = obj.remove("applicationId").and_then(|v| v.as_i64());
+        let cid = obj.remove("correspondenceId").and_then(|v| v.as_i64());
+        let au = aid.and_then(|id| app_map.get(&id)).cloned();
+        let cu = cid.and_then(|id| corr_map.get(&id)).cloned();
+        obj.insert("applicationUuid".into(), json!(au));
+        obj.insert("correspondenceUuid".into(), json!(cu));
+    }
+    root.insert("application_events".into(), Json::Array(events));
+
+    let mut corr_cols = with_key("uuid", "uuid", CORR_COLS);
+    corr_cols.push(("application_id", "applicationId")); // mapped below
+    let mut corr = export_table(conn, "application_correspondence", &corr_cols)?;
+    for row in &mut corr {
+        let Some(obj) = row.as_object_mut() else { continue };
+        let aid = obj.remove("applicationId").and_then(|v| v.as_i64());
+        let au = aid.and_then(|id| app_map.get(&id)).cloned();
+        obj.insert("applicationUuid".into(), json!(au));
+    }
+    root.insert("application_correspondence".into(), Json::Array(corr));
+
+    root.insert(
+        "reference_contacts".into(),
+        Json::Array(export_table(
+            conn,
+            "reference_contacts",
+            &with_key("uuid", "uuid", REF_COLS),
+        )?),
+    );
+    root.insert(
+        "prepared_answers".into(),
+        Json::Array(export_table(
+            conn,
+            "prepared_answers",
+            &with_key("uuid", "uuid", ANSWER_COLS),
+        )?),
+    );
+    root.insert(
+        "resume_versions".into(),
+        Json::Array(export_table(
+            conn,
+            "resume_versions",
+            &with_key("uuid", "uuid", RESUME_COLS),
+        )?),
+    );
+    root.insert(
+        "profile".into(),
+        Json::Array(export_table(
+            conn,
+            "profile",
+            &with_key("field_key", "fieldKey", PROFILE_COLS),
+        )?),
+    );
+
+    // Tombstones straight from sync_tombstones.
+    let mut stmt = conn
+        .prepare("SELECT table_name, uuid, deleted_at FROM sync_tombstones")
+        .map_err(err)?;
+    let mut rows = stmt.query([]).map_err(err)?;
+    let mut tombs = Vec::new();
+    while let Some(row) = rows.next().map_err(err)? {
+        tombs.push(json!({
+            "table": row.get::<_, String>(0).map_err(err)?,
+            "uuid": row.get::<_, String>(1).map_err(err)?,
+            "deletedAt": row.get::<_, String>(2).map_err(err)?,
+        }));
+    }
+    root.insert("tombstones".into(), Json::Array(tombs));
+
     Ok(Json::Object(root))
 }
 
 /// Replaces the local database with the snapshot in one transaction.
 /// FK checks are deferred so table order can't break the import.
+/// (Legacy v1 path — v2 snapshots go through `merge_snapshot`.)
 fn import_snapshot(conn: &Connection, snapshot: &Json) -> Result<usize, String> {
     let tx = conn.unchecked_transaction().map_err(err)?;
     tx.execute_batch("PRAGMA defer_foreign_keys = ON;")
@@ -318,6 +529,331 @@ fn import_snapshot(conn: &Connection, snapshot: &Json) -> Result<usize, String> 
     }
     tx.commit().map_err(err)?;
     Ok(total)
+}
+
+// ---------- merge (v2: union by uuid, last-writer-wins, tombstones) ----------
+
+/// Outcome of one pull-merge, for the status message.
+#[derive(Default, Debug, PartialEq)]
+pub(crate) struct MergeStats {
+    inserted: usize,
+    updated: usize,
+    /// Rows removed locally because an incoming tombstone outvoted them.
+    tombstoned: usize,
+}
+
+/// Tables a tombstone may name (whitelist before any SQL interpolation).
+fn tombstone_table_ok(table: &str) -> bool {
+    matches!(
+        table,
+        "applications"
+            | "application_events"
+            | "application_correspondence"
+            | "reference_contacts"
+            | "prepared_answers"
+            | "resume_versions"
+            | "profile"
+    )
+}
+
+/// JSON string field, rejecting empty strings.
+fn jstr<'a>(row: &'a Json, key: &str) -> Option<&'a str> {
+    row.get(key)
+        .and_then(Json::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// Snapshot array for a key, or an empty slice.
+fn rows_of<'a>(snapshot: &'a Json, key: &str) -> &'a [Json] {
+    snapshot
+        .get(key)
+        .and_then(Json::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn json_to_sql(v: &Json) -> SqlValue {
+    match v {
+        Json::Null => SqlValue::Null,
+        Json::Bool(b) => SqlValue::Integer(*b as i64),
+        Json::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                SqlValue::Integer(i)
+            } else {
+                SqlValue::Real(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        Json::String(s) => SqlValue::Text(s.clone()),
+        _ => SqlValue::Null,
+    }
+}
+
+/// uuid → local id map, used to attach children to their parents.
+fn uuid_id_map(
+    conn: &Connection,
+    table: &str,
+) -> Result<std::collections::HashMap<String, i64>, String> {
+    let mut stmt = conn
+        .prepare(&format!("SELECT uuid, id FROM {table} WHERE uuid <> ''"))
+        .map_err(err)?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        .map_err(err)?;
+    rows.collect::<rusqlite::Result<_>>().map_err(err)
+}
+
+/// True when a local tombstone still outvotes this incoming row (the
+/// deletion happened at-or-after the row's last edit).
+fn tombstone_wins(
+    conn: &Connection,
+    table: &str,
+    uuid: &str,
+    updated_at: &str,
+) -> Result<bool, String> {
+    let deleted_at: Option<String> = conn
+        .query_row(
+            "SELECT deleted_at FROM sync_tombstones WHERE table_name = ?1 AND uuid = ?2",
+            params![table, uuid],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(err)?;
+    Ok(deleted_at.is_some_and(|d| d.as_str() >= updated_at))
+}
+
+fn clear_tombstone(conn: &Connection, table: &str, uuid: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM sync_tombstones WHERE table_name = ?1 AND uuid = ?2",
+        params![table, uuid],
+    )
+    .map_err(err)?;
+    Ok(())
+}
+
+/// Applies one incoming row with last-writer-wins semantics: insert when the
+/// uuid is unknown, overwrite only when the incoming `updatedAt` is strictly
+/// newer than the local row's. `extra` supplies FK ids resolved by the
+/// caller. Returns true when a row was written.
+fn apply_row(
+    conn: &Connection,
+    table: &str,
+    key_col: &str,
+    uuid: &str,
+    row: &Json,
+    cols: &[SqlCol],
+    extra: &[(&str, SqlValue)],
+    stats: &mut MergeStats,
+) -> Result<bool, String> {
+    let Some(obj) = row.as_object() else { return Ok(false) };
+    let updated_at = jstr(row, "updatedAt").unwrap_or("");
+    if updated_at.is_empty() {
+        return Ok(false); // no timestamp → cannot order this row; ignore it
+    }
+    if tombstone_wins(conn, table, uuid, updated_at)? {
+        return Ok(false);
+    }
+    // The row is alive again (or new): any stale tombstone must go, or a
+    // future pull would delete it.
+    clear_tombstone(conn, table, uuid)?;
+
+    let mut names: Vec<&str> = vec![key_col];
+    let mut vals: Vec<SqlValue> = vec![SqlValue::Text(uuid.to_string())];
+    for (col, key) in cols {
+        if *col == key_col {
+            continue;
+        }
+        // Absent keys are omitted so the column's own default stands in —
+        // an incoming row should never null out a NOT NULL column.
+        let Some(v) = obj.get(*key) else { continue };
+        names.push(col);
+        vals.push(json_to_sql(v));
+    }
+    for (col, v) in extra {
+        names.push(col);
+        vals.push(v.clone());
+    }
+
+    let existing: Option<String> = conn
+        .query_row(
+            &format!("SELECT updated_at FROM {table} WHERE {key_col} = ?1"),
+            params![uuid],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(err)?;
+    if existing.is_some() {
+        // Local row exists: last writer wins. Equal timestamps keep local.
+        if existing.unwrap().as_str() >= updated_at {
+            return Ok(false);
+        }
+        let sets = names
+            .iter()
+            .map(|c| format!("{c} = ?"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let n = names.len();
+        conn.execute(
+            &format!("UPDATE {table} SET {sets} WHERE {key_col} = ?{n1}", n1 = n + 1),
+            params_from_iter(
+                vals.into_iter()
+                    .chain(std::iter::once(SqlValue::Text(uuid.to_string()))),
+            ),
+        )
+        .map_err(err)?;
+        stats.updated += 1;
+    } else {
+        let sql = format!(
+            "INSERT INTO {table} ({}) VALUES ({})",
+            names.join(", "),
+            vec!["?"; names.len()].join(", ")
+        );
+        conn.execute(&sql, params_from_iter(vals)).map_err(err)?;
+        stats.inserted += 1;
+    }
+    Ok(true)
+}
+
+/// Merges an incoming v2 snapshot into the local database: union by uuid,
+/// per-row last-writer-wins by `updated_at`, incoming tombstones applied
+/// first (an edit newer than the deletion resurrects the row).
+fn merge_snapshot(conn: &Connection, snapshot: &Json) -> Result<MergeStats, String> {
+    let mut stats = MergeStats::default();
+    let tx = conn.unchecked_transaction().map_err(err)?;
+
+    // 1) Deletions first, so a snapshot carrying both a tombstone and the
+    //    row it deleted does not resurrect the row.
+    if let Some(tombs) = snapshot.get("tombstones").and_then(Json::as_array) {
+        for t in tombs {
+            let table = t.get("table").and_then(Json::as_str).unwrap_or("");
+            let uuid = t.get("uuid").and_then(Json::as_str).unwrap_or("");
+            let deleted_at = t.get("deletedAt").and_then(Json::as_str).unwrap_or("");
+            if !tombstone_table_ok(table) || uuid.is_empty() || deleted_at.is_empty() {
+                continue;
+            }
+            let local_updated: Option<String> = if table == "profile" {
+                tx.query_row(
+                    "SELECT updated_at FROM profile WHERE field_key = ?1",
+                    params![uuid],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(err)?
+            } else {
+                tx.query_row(
+                    &format!("SELECT updated_at FROM {table} WHERE uuid = ?1"),
+                    params![uuid],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(err)?
+            };
+            if let Some(local_updated) = local_updated {
+                if local_updated.as_str() > deleted_at {
+                    // Edited after the deletion: the edit wins, tombstone drops.
+                    clear_tombstone(&tx, table, uuid)?;
+                    continue;
+                }
+                // Tombstone wins: remove the local row now.
+                if table == "profile" {
+                    stats.tombstoned += tx
+                        .execute("DELETE FROM profile WHERE field_key = ?1", params![uuid])
+                        .map_err(err)?;
+                } else {
+                    stats.tombstoned += tx
+                        .execute(
+                            &format!("DELETE FROM {table} WHERE uuid = ?1"),
+                            params![uuid],
+                        )
+                        .map_err(err)?;
+                }
+            }
+            // Remember the deletion locally (MAX on conflict) so this
+            // device's next export carries it to everyone else.
+            record_tombstones(&tx, table, &[uuid.to_string()]).map_err(err)?;
+        }
+    }
+
+    // 2) Data rows, parents before children.
+    for row in rows_of(snapshot, "resume_versions") {
+        let Some(uuid) = jstr(row, "uuid") else { continue };
+        apply_row(&tx, "resume_versions", "uuid", uuid, row, RESUME_COLS, &[], &mut stats)?;
+    }
+    for row in rows_of(snapshot, "prepared_answers") {
+        let Some(uuid) = jstr(row, "uuid") else { continue };
+        apply_row(&tx, "prepared_answers", "uuid", uuid, row, ANSWER_COLS, &[], &mut stats)?;
+    }
+    for row in rows_of(snapshot, "reference_contacts") {
+        let Some(uuid) = jstr(row, "uuid") else { continue };
+        apply_row(&tx, "reference_contacts", "uuid", uuid, row, REF_COLS, &[], &mut stats)?;
+    }
+    for row in rows_of(snapshot, "profile") {
+        // profile has no uuid column: field_key is the stable identity.
+        let Some(key) = jstr(row, "fieldKey") else { continue };
+        apply_row(&tx, "profile", "field_key", key, row, PROFILE_COLS, &[], &mut stats)?;
+    }
+
+    let resume_ids = uuid_id_map(&tx, "resume_versions")?;
+    for row in rows_of(snapshot, "applications") {
+        let Some(uuid) = jstr(row, "uuid") else { continue };
+        let resume_id = jstr(row, "resumeVersionUuid")
+            .and_then(|u| resume_ids.get(u).copied());
+        let extra = [(
+            "resume_version_id",
+            resume_id
+                .map(SqlValue::Integer)
+                .unwrap_or(SqlValue::Null),
+        )];
+        apply_row(&tx, "applications", "uuid", uuid, row, APP_COLS, &extra, &mut stats)?;
+    }
+
+    let app_ids = uuid_id_map(&tx, "applications")?;
+    for row in rows_of(snapshot, "application_correspondence") {
+        let Some(uuid) = jstr(row, "uuid") else { continue };
+        // Children whose parent is missing cannot attach: skip them.
+        let Some(app_uuid) = jstr(row, "applicationUuid") else { continue };
+        let Some(app_id) = app_ids.get(app_uuid).copied() else {
+            continue;
+        };
+        let extra = [("application_id", SqlValue::Integer(app_id))];
+        apply_row(&tx, "application_correspondence", "uuid", uuid, row, CORR_COLS, &extra, &mut stats)?;
+    }
+
+    let corr_ids = uuid_id_map(&tx, "application_correspondence")?;
+    for row in rows_of(snapshot, "application_events") {
+        let Some(uuid) = jstr(row, "uuid") else { continue };
+        let Some(app_uuid) = jstr(row, "applicationUuid") else { continue };
+        let Some(app_id) = app_ids.get(app_uuid).copied() else {
+            continue;
+        };
+        let corr_id = match jstr(row, "correspondenceUuid") {
+            Some(corr_uuid) => corr_ids.get(corr_uuid).copied(),
+            None => None,
+        };
+        let extra = [
+            ("application_id", SqlValue::Integer(app_id)),
+            (
+                "correspondence_id",
+                corr_id.map(SqlValue::Integer).unwrap_or(SqlValue::Null),
+            ),
+        ];
+        apply_row(&tx, "application_events", "uuid", uuid, row, EVENT_COLS, &extra, &mut stats)?;
+    }
+
+    tx.commit().map_err(err)?;
+    Ok(stats)
+}
+
+/// Detects a v2 snapshot (uuid-based, mergeable) vs the legacy v1 shape.
+fn snapshot_is_v2(snapshot: &Json) -> bool {
+    if snapshot.get("version").and_then(Json::as_i64) == Some(2) {
+        return true;
+    }
+    snapshot
+        .get("applications")
+        .and_then(Json::as_array)
+        .and_then(|a| a.first())
+        .map(|row| jstr(row, "uuid").is_some())
+        .unwrap_or(false)
 }
 
 // ---------- Dropbox API ----------
@@ -682,50 +1218,134 @@ pub async fn sync_push(
     .await
 }
 
-/// Downloads the cloud snapshot, decrypts it, and replaces the local data.
-/// A pre-pull backup of the current data is written next to the database.
-#[tauri::command]
-pub async fn sync_pull(
-    app: tauri::AppHandle,
-    db: tauri::State<'_, DbState>,
-    passphrase: Option<String>,
+/// Downloads the cloud snapshot and applies it to the local database.
+/// v2 snapshots are *merged* (union by uuid, last-writer-wins) with a safety
+/// backup written first; legacy v1 snapshots still replace-all but only
+/// into an empty local database (anything else risks data loss).
+async fn pull_and_merge(
+    app: &tauri::AppHandle,
+    db: &tauri::State<'_, DbState>,
+    pass_override: Option<&str>,
 ) -> Result<String, String> {
-    let config = load_config(&app)?;
-    let pass = passphrase
-        .or(Some(config.passphrase.clone()))
-        .filter(|p| !p.is_empty());
+    let config = load_config(app)?;
+    let pass = pass_override
+        .map(str::to_string)
+        .or_else(|| Some(config.passphrase.clone()).filter(|p| !p.is_empty()));
 
     let token = access_token(&config).await?;
     let (blob, rev) = dropbox_download(&token).await?;
     let snapshot = unpack_blob(&blob, pass.as_deref().unwrap_or(""))?;
 
     // Safety backup of the current local data (plain JSON, same shape).
-    {
-        let conn = lock_db_sync(&db)?;
-        let backup = export_snapshot(&conn)?;
+    let result = {
+        let conn = lock_db_sync(db)?;
         if let Ok(dir) = app.path().app_data_dir() {
-            let _ = std::fs::write(dir.join("pre-pull-backup.json"), serde_json::to_vec(&backup).unwrap_or_default());
+            let backup = export_snapshot(&conn)?;
+            let _ = std::fs::write(
+                dir.join("pre-pull-backup.json"),
+                serde_json::to_vec(&backup).unwrap_or_default(),
+            );
         }
-        let imported = import_snapshot(&conn, &snapshot)?;
-        drop(conn);
-        let mut updated = config;
-        if let Some(rev) = rev {
-            updated.last_known_rev = rev;
+        if snapshot_is_v2(&snapshot) {
+            let stats = merge_snapshot(&conn, &snapshot)?;
+            let mut updated = config;
+            if let Some(rev) = rev {
+                updated.last_known_rev = rev;
+            }
+            // Digest of the *incoming* snapshot: the local data now also
+            // carries our side of the merge, so the dot stays dirty until
+            // the follow-up push in the same sync cycle.
+            updated.last_pushed_digest = snapshot_digest(&snapshot);
+            updated.last_sync_at = now_iso();
+            save_config(app, &updated)?;
+            Ok(format!(
+                "Merged the cloud snapshot: {} added, {} updated, {} removed. A backup of your previous data is at pre-pull-backup.json.",
+                stats.inserted, stats.updated, stats.tombstoned
+            ))
+        } else {
+            // Legacy v1 blob: only safe into an empty local database.
+            let apps: i64 = conn
+                .query_row("SELECT COUNT(*) FROM applications", [], |r| r.get(0))
+                .map_err(err)?;
+            if apps > 0 {
+                Err("This cloud file is from an older version. Push once from this device to upgrade it, then sync.".to_string())
+            } else {
+                let imported = import_snapshot(&conn, &snapshot)?;
+                let mut updated = config;
+                if let Some(rev) = rev {
+                    updated.last_known_rev = rev;
+                }
+                updated.last_pushed_digest = snapshot_digest(&snapshot);
+                updated.last_sync_at = now_iso();
+                save_config(app, &updated)?;
+                Ok(format!(
+                    "Restored the cloud snapshot: {imported} rows imported. A backup of your previous data is at pre-pull-backup.json."
+                ))
+            }
         }
-        // Local data now equals the cloud snapshot: the dot shows synced.
-        updated.last_pushed_digest = snapshot_digest(&snapshot);
-        updated.last_sync_at = now_iso();
-        save_config(&app, &updated)?;
-        Ok(format!(
-            "Pulled and applied the cloud snapshot: {imported} rows restored. A backup of your previous data is at pre-pull-backup.json."
-        ))
-    }
+    };
+    result
 }
 
-/// Auto-sync on app close: pushes the snapshot if connected, auto-sync is
-/// on, and (with E2E) a remembered passphrase exists. Runs synchronously on
-/// the exit path so the upload finishes before the process dies; the result
-/// is appended to `sync.log` and visible via the header dot next launch.
+/// Downloads the cloud snapshot, decrypts it, and merges it into the local
+/// data. A pre-pull backup of the current data is written next to the
+/// database.
+#[tauri::command]
+pub async fn sync_pull(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, DbState>,
+    passphrase: Option<String>,
+) -> Result<String, String> {
+    pull_and_merge(
+        &app,
+        &db,
+        passphrase.as_deref().filter(|p| !p.is_empty()),
+    )
+    .await
+}
+
+/// One "Sync now": pull-merge only when the cloud revision moved since our
+/// last sync, then push the merged result. Also used by the auto-sync on
+/// app exit, so both paths behave identically.
+#[tauri::command]
+pub async fn sync_cycle(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, DbState>,
+    passphrase: Option<String>,
+) -> Result<String, String> {
+    let config = load_config(&app)?;
+    let mut messages: Vec<String> = Vec::new();
+
+    let token = access_token(&config).await?;
+    let meta = dropbox_metadata(&token).await?;
+    match meta {
+        // Cloud unchanged since our last sync: nothing to pull.
+        Some((rev, _)) if rev == config.last_known_rev => {}
+        // Cloud moved (or we never saw it): pull-merge first.
+        Some(_) => {
+            messages.push(
+                pull_and_merge(
+                    &app,
+                    &db,
+                    passphrase.as_deref().filter(|p| !p.is_empty()),
+                )
+                .await?,
+            );
+        }
+        // No cloud file yet: the push below creates it.
+        None => {}
+    }
+    messages.push(
+        push_snapshot(&app, &db, passphrase.as_deref().filter(|p| !p.is_empty())).await?,
+    );
+    Ok(messages.join(" "))
+}
+
+/// Auto-sync on app close: runs the same pull-merge-then-push cycle as the
+/// "Sync now" button if connected, auto-sync is on, and (with E2E) a
+/// remembered passphrase exists. Runs synchronously on the exit path so the
+/// upload finishes before the process dies; the result is appended to
+/// `sync.log` and visible via the header dot next launch.
 pub fn auto_push_on_exit(app: &tauri::AppHandle) {
     let outcome = tauri::async_runtime::block_on(async {
         let config = load_config(app)?;
@@ -736,7 +1356,7 @@ pub fn auto_push_on_exit(app: &tauri::AppHandle) {
             return Ok("auto-sync skipped: encrypted but no remembered passphrase".to_string());
         }
         let db = app.state::<DbState>();
-        push_snapshot(app, &db, None).await
+        sync_cycle(app.clone(), db, None).await
     });
     let line = match outcome {
         Ok(msg) => format!("{} auto-sync OK: {msg}", now_iso()),
@@ -834,10 +1454,8 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_export_import() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        crate::db::migrate(&conn).unwrap();
+    fn snapshot_export_merge_round_trip() {
+        let conn = fresh_db();
         conn.execute(
             "INSERT INTO applications (company, role, status, created_at, updated_at)
              VALUES ('Acme', 'Dev', 'applied', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
@@ -858,12 +1476,13 @@ mod tests {
         .unwrap();
 
         let snap = export_snapshot(&conn).unwrap();
-        // wipe and re-import
+        // wipe and merge everything back in
         for table in TABLES {
             conn.execute(&format!("DELETE FROM {table}"), []).unwrap();
         }
-        let imported = import_snapshot(&conn, &snap).unwrap();
-        assert!(imported >= 3);
+        let stats = merge_snapshot(&conn, &snap).unwrap();
+        assert!(stats.inserted >= 3, "stats = {stats:?}");
+        assert_eq!(stats.updated, 0);
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM application_events", [], |r| r.get(0))
             .unwrap();
@@ -872,5 +1491,267 @@ mod tests {
             .query_row("SELECT value FROM profile WHERE field_key = 'Email'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(email, "a@b.c");
+    }
+
+    fn fresh_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        crate::db::migrate(&conn).unwrap();
+        conn
+    }
+
+    /// Forces a known uuid on a row (migrate backfills random ones).
+    fn set_uuid(conn: &Connection, table: &str, id: i64, uuid: &str) {
+        conn.execute(
+            &format!("UPDATE {table} SET uuid = ?1 WHERE id = ?2"),
+            rusqlite::params![uuid, id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn snapshot_version_detection() {
+        let v1 = json!({ "schemaVersion": 1, "applications": [{ "id": 1, "company": "A" }] });
+        assert!(!snapshot_is_v2(&v1));
+        let v2 = json!({ "version": 2, "applications": [] });
+        assert!(snapshot_is_v2(&v2));
+        let v2_no_flag = json!({ "applications": [{ "uuid": "x", "updatedAt": "2026-01-01" }] });
+        assert!(snapshot_is_v2(&v2_no_flag));
+    }
+
+    /// Legacy v1 snapshots (SQL-named keys) still import wholesale.
+    #[test]
+    fn legacy_v1_import_still_works() {
+        let conn = fresh_db();
+        let v1 = json!({
+            "applications": [{
+                "company": "Acme", "role": "Dev", "status": "applied",
+                "created_at": "2026-01-01T00:00:00.000Z",
+                "updated_at": "2026-01-01T00:00:00.000Z"
+            }],
+            "profile": [{
+                "field_key": "Email", "value": "a@b.c",
+                "updated_at": "2026-01-01T00:00:00.000Z"
+            }],
+        });
+        let imported = import_snapshot(&conn, &v1).unwrap();
+        assert_eq!(imported, 2);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM applications", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn merge_inserts_and_maps_fks() {
+        let donor = fresh_db();
+        donor
+            .execute(
+                "INSERT INTO resume_versions (name, created_at, updated_at)
+                 VALUES ('Res', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+        let resume_id = donor.last_insert_rowid();
+        set_uuid(&donor, "resume_versions", resume_id, "resume-uuid");
+        donor
+            .execute(
+                "INSERT INTO applications (company, role, status, resume_version_id, created_at, updated_at)
+                 VALUES ('Acme', 'Dev', 'applied', ?1, '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z')",
+                rusqlite::params![resume_id],
+            )
+            .unwrap();
+        let app_id = donor.last_insert_rowid();
+        set_uuid(&donor, "applications", app_id, "app-uuid");
+        donor
+            .execute(
+                "INSERT INTO application_events (application_id, occurred_at, kind, note, created_at, updated_at)
+                 VALUES (?1, '2026-01-01', 'applied', 'applied online', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+                rusqlite::params![app_id],
+            )
+            .unwrap();
+        set_uuid(&donor, "application_events", donor.last_insert_rowid(), "event-uuid");
+        donor
+            .execute(
+                "INSERT INTO application_correspondence (application_id, kind, occurred_at, body, created_at, updated_at)
+                 VALUES (?1, 'email', '2026-01-03', 'hello', '2026-01-03T00:00:00.000Z', '2026-01-03T00:00:00.000Z')",
+                rusqlite::params![app_id],
+            )
+            .unwrap();
+        set_uuid(&donor, "application_correspondence", donor.last_insert_rowid(), "corr-uuid");
+
+        let snap = export_snapshot(&donor).unwrap();
+        let target = fresh_db();
+        let stats = merge_snapshot(&target, &snap).unwrap();
+        assert_eq!(
+            stats,
+            MergeStats { inserted: 4, updated: 0, tombstoned: 0 }
+        );
+
+        // Local integer ids were assigned fresh, but every link survived.
+        let app_id: i64 = target
+            .query_row("SELECT id FROM applications WHERE uuid = 'app-uuid'", [], |r| r.get(0))
+            .unwrap();
+        let resume_id: i64 = target
+            .query_row("SELECT id FROM resume_versions WHERE uuid = 'resume-uuid'", [], |r| r.get(0))
+            .unwrap();
+        let linked: Option<i64> = target
+            .query_row(
+                "SELECT resume_version_id FROM applications WHERE id = ?1",
+                [app_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked, Some(resume_id));
+        let ev_app: i64 = target
+            .query_row("SELECT application_id FROM application_events WHERE uuid = 'event-uuid'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ev_app, app_id);
+        let corr_app: i64 = target
+            .query_row(
+                "SELECT application_id FROM application_correspondence WHERE uuid = 'corr-uuid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(corr_app, app_id);
+    }
+
+    #[test]
+    fn merge_last_writer_wins() {
+        let donor = fresh_db();
+        donor
+            .execute(
+                "INSERT INTO applications (company, role, status, created_at, updated_at)
+                 VALUES ('Acme', 'Dev', 'rejected', '2026-01-01T00:00:00.000Z', '2026-01-05T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+        set_uuid(&donor, "applications", donor.last_insert_rowid(), "app-uuid");
+        let snap = export_snapshot(&donor).unwrap();
+
+        // Local row edited EARLIER: the incoming (newer) edit wins.
+        let target = fresh_db();
+        target
+            .execute(
+                "INSERT INTO applications (company, role, status, created_at, updated_at)
+                 VALUES ('Acme', 'Dev', 'applied', '2026-01-01T00:00:00.000Z', '2026-01-03T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+        set_uuid(&target, "applications", target.last_insert_rowid(), "app-uuid");
+        let stats = merge_snapshot(&target, &snap).unwrap();
+        assert_eq!(stats.updated, 1);
+        assert_eq!(stats.inserted, 0);
+        let status: String = target
+            .query_row("SELECT status FROM applications WHERE uuid = 'app-uuid'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "rejected");
+
+        // Local row edited LATER: the local edit survives untouched.
+        let target = fresh_db();
+        target
+            .execute(
+                "INSERT INTO applications (company, role, status, created_at, updated_at)
+                 VALUES ('Acme', 'Dev', 'offer', '2026-01-01T00:00:00.000Z', '2026-01-09T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+        set_uuid(&target, "applications", target.last_insert_rowid(), "app-uuid");
+        let stats = merge_snapshot(&target, &snap).unwrap();
+        assert_eq!(stats.updated, 0);
+        let status: String = target
+            .query_row("SELECT status FROM applications WHERE uuid = 'app-uuid'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "offer");
+    }
+
+    #[test]
+    fn tombstone_deletes_and_propagates() {
+        let donor = fresh_db();
+        donor
+            .execute(
+                "INSERT INTO applications (company, role, status, created_at, updated_at)
+                 VALUES ('Acme', 'Dev', 'applied', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+        set_uuid(&donor, "applications", donor.last_insert_rowid(), "app-uuid");
+        record_tombstones(&donor, "applications", &["app-uuid".to_string()]).unwrap();
+        let snap = export_snapshot(&donor).unwrap();
+        // The row and its tombstone both travel in the snapshot.
+        assert_eq!(rows_of(&snap, "applications").len(), 1);
+        assert_eq!(rows_of(&snap, "tombstones").len(), 1);
+
+        // Target has the same row, last edited before the deletion.
+        let target = fresh_db();
+        target
+            .execute(
+                "INSERT INTO applications (company, role, status, created_at, updated_at)
+                 VALUES ('Acme', 'Dev', 'applied', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+        set_uuid(&target, "applications", target.last_insert_rowid(), "app-uuid");
+        let stats = merge_snapshot(&target, &snap).unwrap();
+        assert_eq!(stats.tombstoned, 1);
+        let n: i64 = target
+            .query_row("SELECT COUNT(*) FROM applications", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+
+        // The deletion is remembered locally, so the next export carries it.
+        let out = export_snapshot(&target).unwrap();
+        assert_eq!(rows_of(&out, "tombstones").len(), 1);
+
+        // Re-merging the same snapshot must not resurrect the row.
+        let stats2 = merge_snapshot(&target, &snap).unwrap();
+        assert_eq!(stats2.inserted, 0);
+        assert_eq!(stats2.tombstoned, 0);
+    }
+
+    #[test]
+    fn tombstone_loses_to_later_edit() {
+        // Deletion happened Jan 3; the row was edited again Jan 4.
+        let snap = json!({
+            "version": 2,
+            "applications": [{
+                "uuid": "app-uuid",
+                "company": "Acme", "role": "Dev", "status": "offer",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "updatedAt": "2026-01-05T00:00:00.000Z"
+            }],
+            "tombstones": [{
+                "table": "applications", "uuid": "app-uuid",
+                "deletedAt": "2026-01-03T00:00:00.000Z"
+            }]
+        });
+        let target = fresh_db();
+        target
+            .execute(
+                "INSERT INTO applications (company, role, status, created_at, updated_at)
+                 VALUES ('Acme', 'Dev', 'applied', '2026-01-01T00:00:00.000Z', '2026-01-04T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+        set_uuid(&target, "applications", target.last_insert_rowid(), "app-uuid");
+
+        let stats = merge_snapshot(&target, &snap).unwrap();
+        // The row survives (edit after delete) and takes the newer content.
+        assert_eq!(stats.tombstoned, 0);
+        assert_eq!(stats.updated, 1);
+        let n: i64 = target
+            .query_row("SELECT COUNT(*) FROM applications", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        let status: String = target
+            .query_row("SELECT status FROM applications WHERE uuid = 'app-uuid'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "offer");
+        // The outvoted tombstone is gone, so no future pull deletes the row.
+        let tombs: i64 = target
+            .query_row("SELECT COUNT(*) FROM sync_tombstones", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tombs, 0);
     }
 }

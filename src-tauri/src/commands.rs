@@ -1,4 +1,4 @@
-use crate::db::{now_iso, DbState};
+use crate::db::{now_iso, tombstone_app_tree, tombstone_by_ids, record_tombstones, DbState};
 use crate::models::{
     Application, ApplicationCorrespondence, ApplicationEvent, ApplicationInput,
     CorrespondenceInput, EventInput, ImportBatch, ImportResult, PreparedAnswer, ProfileField,
@@ -239,9 +239,30 @@ pub fn update_application(
     save_and_fetch(&conn, id, &input).map_err(err_msg)
 }
 
+/// Tombstones every application matching a WHERE clause, including its
+/// cascaded timeline events and correspondence. Returns how many matched.
+fn tombstone_app_selection(
+    conn: &Connection,
+    where_sql: &str,
+    params: &[&dyn rusqlite::ToSql],
+) -> Result<usize, String> {
+    let ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare(&format!("SELECT id FROM applications WHERE {where_sql}"))
+            .map_err(err_msg)?;
+        let rows = stmt.query_map(params, |row| row.get(0)).map_err(err_msg)?;
+        rows.collect::<rusqlite::Result<_>>().map_err(err_msg)?
+    };
+    for id in &ids {
+        tombstone_app_tree(conn, *id).map_err(err_msg)?;
+    }
+    Ok(ids.len())
+}
+
 #[tauri::command]
 pub fn delete_application(id: i64, state: State<DbState>) -> Result<bool, String> {
     let conn = lock_db(&state)?;
+    tombstone_app_tree(&conn, id).map_err(err_msg)?;
     conn.execute("DELETE FROM applications WHERE id = ?1", params![id])
         .map_err(err_msg)?;
     Ok(true)
@@ -257,6 +278,9 @@ pub fn delete_applications(ids: Vec<i64>, state: State<DbState>) -> Result<usize
     let conn = lock_db(&state)?;
     let tx = conn.unchecked_transaction().map_err(err_msg)?;
     let mut deleted = 0_usize;
+    for id in &ids {
+        tombstone_app_tree(&tx, *id).map_err(err_msg)?;
+    }
     {
         let mut stmt = tx
             .prepare("DELETE FROM applications WHERE id = ?1")
@@ -382,6 +406,7 @@ pub fn update_event(
 #[tauri::command]
 pub fn delete_event(id: i64, state: State<DbState>) -> Result<bool, String> {
     let conn = lock_db(&state)?;
+    tombstone_by_ids(&conn, "application_events", &[id]).map_err(err_msg)?;
     conn.execute("DELETE FROM application_events WHERE id = ?1", params![id])
         .map_err(err_msg)?;
     Ok(true)
@@ -589,6 +614,18 @@ pub fn update_correspondence(
 pub fn delete_correspondence(id: i64, state: State<DbState>) -> Result<bool, String> {
     let conn = lock_db(&state)?;
     // The linked timeline entry travels with the item (single source of truth).
+    tombstone_by_ids(&conn, "application_correspondence", &[id]).map_err(err_msg)?;
+    {
+        let mut stmt = conn
+            .prepare("SELECT uuid FROM application_events WHERE correspondence_id = ?1")
+            .map_err(err_msg)?;
+        let uuids: Vec<String> = stmt
+            .query_map(params![id], |row| row.get(0))
+            .map_err(err_msg)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(err_msg)?;
+        record_tombstones(&conn, "application_events", &uuids).map_err(err_msg)?;
+    }
     conn.execute(
         "DELETE FROM application_events WHERE correspondence_id = ?1",
         params![id],
@@ -844,12 +881,13 @@ pub fn seed_sample_data(state: State<DbState>) -> Result<usize, String> {
 #[tauri::command]
 pub fn delete_sample_data(state: State<DbState>) -> Result<usize, String> {
     let conn = lock_db(&state)?;
-    let deleted = conn
-        .execute(
-            "DELETE FROM applications WHERE company LIKE ?1",
-            params![format!("{SAMPLE_PREFIX}%")],
-        )
-        .map_err(err_msg)?;
+    let prefix = format!("{SAMPLE_PREFIX}%");
+    let deleted = tombstone_app_selection(&conn, "company LIKE ?1", &[&prefix])?;
+    conn.execute(
+        "DELETE FROM applications WHERE company LIKE ?1",
+        params![prefix],
+    )
+    .map_err(err_msg)?;
     Ok(deleted)
 }
 
@@ -869,6 +907,7 @@ pub fn import_applications(
     let tx = conn.unchecked_transaction().map_err(err_msg)?;
     let mut replaced = 0_usize;
     if batch.replace {
+        tombstone_app_selection(&tx, "source = 'Flosa import'", &[])?;
         replaced = tx
             .execute("DELETE FROM applications WHERE source = 'Flosa import'", [])
             .map_err(err_msg)?;
@@ -933,6 +972,7 @@ pub fn import_applications(
 #[tauri::command]
 pub fn delete_imported_flosa(state: State<DbState>) -> Result<usize, String> {
     let conn = lock_db(&state)?;
+    tombstone_app_selection(&conn, "source = 'Flosa import'", &[])?;
     let deleted = conn
         .execute(
             "DELETE FROM applications WHERE source = 'Flosa import'",
@@ -977,6 +1017,7 @@ pub fn set_profile(
     let conn = lock_db(&state)?;
     let now = now_iso();
     if value.trim().is_empty() {
+        record_tombstones(&conn, "profile", &[key.clone()]).map_err(err_msg)?;
         conn.execute(
             "DELETE FROM profile WHERE field_key = ?1",
             params![key],
@@ -1121,6 +1162,7 @@ pub fn update_reference(
 #[tauri::command]
 pub fn delete_reference(id: i64, state: State<DbState>) -> Result<bool, String> {
     let conn = lock_db(&state)?;
+    tombstone_by_ids(&conn, "reference_contacts", &[id]).map_err(err_msg)?;
     conn.execute("DELETE FROM reference_contacts WHERE id = ?1", params![id])
         .map_err(err_msg)?;
     Ok(true)
@@ -1200,6 +1242,7 @@ pub fn update_prepared_answer(
 #[tauri::command]
 pub fn delete_prepared_answer(id: i64, state: State<DbState>) -> Result<bool, String> {
     let conn = lock_db(&state)?;
+    tombstone_by_ids(&conn, "prepared_answers", &[id]).map_err(err_msg)?;
     conn.execute("DELETE FROM prepared_answers WHERE id = ?1", params![id])
         .map_err(err_msg)?;
     Ok(true)
@@ -1281,6 +1324,7 @@ pub fn update_resume(
 #[tauri::command]
 pub fn delete_resume(id: i64, state: State<DbState>) -> Result<bool, String> {
     let conn = lock_db(&state)?;
+    tombstone_by_ids(&conn, "resume_versions", &[id]).map_err(err_msg)?;
     conn.execute("DELETE FROM resume_versions WHERE id = ?1", params![id])
         .map_err(err_msg)?;
     Ok(true)

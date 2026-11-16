@@ -213,6 +213,11 @@ export function syncPull(passphrase: string | null): Promise<string> {
   return invoke("sync_pull", { passphrase });
 }
 
+/** One "Sync now": pull-merge (only when the cloud moved) then push. */
+export function syncCycle(passphrase: string | null): Promise<string> {
+  return invoke("sync_cycle", { passphrase });
+}
+
 export function syncCheckCloud(): Promise<CloudStatus> {
   return invoke("sync_check_cloud");
 }

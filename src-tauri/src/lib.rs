@@ -19,8 +19,8 @@ use commands::{
 };
 use db::DbState;
 use sync::{
-    sync_check_cloud, sync_complete_connect, sync_disconnect, sync_get_info, sync_pull,
-    sync_push, sync_save_settings, sync_start_connect, SyncState,
+    sync_check_cloud, sync_complete_connect, sync_cycle, sync_disconnect, sync_get_info,
+    sync_pull, sync_push, sync_save_settings, sync_start_connect, SyncState,
 };
 use tauri::{Manager, RunEvent};
 
@@ -79,6 +79,7 @@ pub fn run() {
             sync_disconnect,
             sync_push,
             sync_pull,
+            sync_cycle,
             sync_check_cloud,
             backup_now,
             backup_list,
