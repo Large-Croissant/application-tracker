@@ -1,6 +1,6 @@
 [package]
 name = "jobtracker"
-version = "0.1.0"
+version = "0.2.1"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2024"
@@ -29,6 +29,8 @@ tauri-plugin-clipboard-manager = "2.5.0"
 # Cloud sync: HTTP for the Dropbox API, AEAD crypto for end-to-end encryption.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 uuid = { version = "1", features = ["v4"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 chacha20poly1305 = "0.10"
 argon2 = "0.5"
 sha2 = "0.10"
