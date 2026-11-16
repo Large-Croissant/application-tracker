@@ -52,7 +52,7 @@ const TABLES: [&str; 7] = [
 
 #[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
-struct SyncConfig {
+pub(crate) struct SyncConfig {
     app_key: String,
     refresh_token: String,
     /// End-to-end encryption on by default.
@@ -72,10 +72,17 @@ struct SyncConfig {
     /// PKCE verifier between "Connect" and "paste the code".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pkce_verifier: String,
+    /// How many days of local backup files to keep (Settings → Backups).
+    #[serde(default = "default_backup_days")]
+    pub(crate) backup_days: u32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_backup_days() -> u32 {
+    14
 }
 
 fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -87,7 +94,7 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("sync.json"))
 }
 
-fn load_config(app: &tauri::AppHandle) -> Result<SyncConfig, String> {
+pub(crate) fn load_config(app: &tauri::AppHandle) -> Result<SyncConfig, String> {
     let path = config_path(app)?;
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -96,7 +103,7 @@ fn load_config(app: &tauri::AppHandle) -> Result<SyncConfig, String> {
     }
 }
 
-fn save_config(app: &tauri::AppHandle, config: &SyncConfig) -> Result<(), String> {
+pub(crate) fn save_config(app: &tauri::AppHandle, config: &SyncConfig) -> Result<(), String> {
     let path = config_path(app)?;
     let bytes = serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?;
     std::fs::write(path, bytes).map_err(|e| format!("Cannot write sync config: {e}"))

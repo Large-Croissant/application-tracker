@@ -23,3 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 JobTracker.lnk
+
+# Personal drop zone for files to look at / test — never committed by accident
+sandbox/

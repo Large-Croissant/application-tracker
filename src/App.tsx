@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { setTimeFormat, useTimeFormat } from "./lib/datetime";
 import ApplicationForm from "./components/ApplicationForm";
 import ApplicationsTable from "./components/ApplicationsTable";
+import BackupCard from "./components/BackupCard";
 import DetailDrawer from "./components/DetailDrawer";
 import ImportPanel from "./components/ImportPanel";
 import InsightsPanel from "./components/InsightsPanel";
@@ -408,6 +409,13 @@ export default function App() {
                 hint="One encrypted snapshot of everything, in your own Dropbox — also pushes automatically when you close the app."
               >
                 <SyncPanel onSynced={load} />
+              </Section>
+
+              <Section
+                title="Backups & export"
+                hint="Automatic daily local backups on close (newest 14 kept), plus CSV export for spreadsheets."
+              >
+                <BackupCard />
               </Section>
 
               <Section

@@ -1,8 +1,12 @@
+mod backup;
 mod commands;
 mod db;
 mod models;
 mod sync;
 
+use backup::{
+    backup_get_days, backup_list, backup_now, backup_set_days, export_csv, reveal_backup_folder,
+};
 use commands::{
     add_correspondence, add_event, add_prepared_answer, add_reference, add_resume,
     create_application, delete_application, delete_applications, delete_correspondence,
@@ -24,6 +28,7 @@ use tauri::{Manager, RunEvent};
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
@@ -75,12 +80,19 @@ pub fn run() {
             sync_push,
             sync_pull,
             sync_check_cloud,
+            backup_now,
+            backup_list,
+            backup_get_days,
+            backup_set_days,
+            reveal_backup_folder,
+            export_csv,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // Upload the (encrypted) snapshot before the process dies.
             if let RunEvent::ExitRequested { .. } = event {
+                // Local backup first (instant, works offline), then upload.
+                backup::auto_backup_on_exit(app);
                 sync::auto_push_on_exit(app);
             }
         });

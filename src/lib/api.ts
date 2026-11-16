@@ -217,6 +217,43 @@ export function syncCheckCloud(): Promise<CloudStatus> {
   return invoke("sync_check_cloud");
 }
 
+// ---------- backups & export ----------
+
+export interface BackupEntry {
+  name: string;
+  sizeBytes: number;
+  modified: string;
+}
+
+export function backupList(): Promise<BackupEntry[]> {
+  return invoke("backup_list");
+}
+
+/** Returns the backup file path. */
+export function backupNow(): Promise<string> {
+  return invoke("backup_now");
+}
+
+/** How many days of backup files are kept. */
+export function backupGetDays(): Promise<number> {
+  return invoke("backup_get_days");
+}
+
+/** Sets the retention (clamped server-side to 1–365); returns the applied value. */
+export function backupSetDays(days: number): Promise<number> {
+  return invoke("backup_set_days", { days });
+}
+
+export function revealBackupFolder(): Promise<void> {
+  return invoke("reveal_backup_folder");
+}
+
+/** Returns the CSV file path (it is also revealed in Explorer), or null when
+ * the save dialog was cancelled. */
+export function exportCsv(): Promise<string | null> {
+  return invoke("export_csv");
+}
+
 export function listReferences(): Promise<ReferenceContact[]> {
   return invoke("list_references");
 }
