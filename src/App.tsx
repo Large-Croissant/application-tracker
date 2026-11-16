@@ -3,6 +3,7 @@ import { setTimeFormat, useTimeFormat } from "./lib/datetime";
 import ApplicationForm from "./components/ApplicationForm";
 import ApplicationsTable from "./components/ApplicationsTable";
 import BackupCard from "./components/BackupCard";
+import UpdateCard from "./components/UpdateCard";
 import DetailDrawer from "./components/DetailDrawer";
 import ImportPanel from "./components/ImportPanel";
 import InsightsPanel from "./components/InsightsPanel";
@@ -416,6 +417,13 @@ export default function App() {
                 hint="Automatic daily local backups on close (newest 14 kept), plus CSV export for spreadsheets."
               >
                 <BackupCard />
+              </Section>
+
+              <Section
+                title="Software updates"
+                hint="The app can check GitHub and update itself in place — your data is never touched."
+              >
+                <UpdateCard />
               </Section>
 
               <Section
