@@ -67,6 +67,19 @@ in the repo root wraps any command with it:
 .\dev_env.cmd npm run tauri dev
 ```
 
+## Releasing
+
+```powershell
+.\release.ps1 -Version 0.2.2 -Notes "What's new in this release"
+```
+
+Bumps the version everywhere (package.json, tauri.conf.json, Cargo.toml, Cargo.lock),
+commits and pushes it, runs the test suite, builds the signed installers, generates the
+updater manifest (`latest.json`, written without a UTF-8 BOM — the updater's JSON
+decoder rejects a BOM), publishes the GitHub release with all assets, and verifies the
+public update feed serves it. Requires an authenticated `gh` CLI and the updater
+signing key at `%USERPROFILE%\.tauri\jobtracker_updater.key`.
+
 ## Stack
 
 Tauri 2 · React 18 · TypeScript · Rust (rusqlite) · d3 (sankey flow chart)
